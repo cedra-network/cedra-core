@@ -77,44 +77,50 @@ pub const BACK_PRESSURE_POLLING_INTERVAL_MS: u64 = 10;
 impl UnverifiedEvent {
     pub fn verify(
         self,
-        peer_id: PeerId,
-        validator: &ValidatorVerifier,
-        quorum_store_enabled: bool,
-        self_message: bool,
-        max_num_batches: usize,
+        _peer_id: PeerId,
+        _validator: &ValidatorVerifier,
+        _quorum_store_enabled: bool,
+        _self_message: bool,
+        _max_num_batches: usize,
+        _max_batch_expiry_gap_usecs: u64,
     ) -> Result<VerifiedEvent, VerifyError> {
         Ok(match self {
             //TODO: no need to sign and verify the proposal
             UnverifiedEvent::ProposalMsg(p) => {
-                if !self_message {
-                    p.verify(validator, quorum_store_enabled)?;
-                }
+                // if !self_message {
+                //     p.verify(validator, quorum_store_enabled)?;
+                // }
                 VerifiedEvent::ProposalMsg(p)
             },
             UnverifiedEvent::VoteMsg(v) => {
-                if !self_message {
-                    v.verify(validator)?;
-                }
+                // if !self_message {
+                //     v.verify(validator)?;
+                // }
                 VerifiedEvent::VoteMsg(v)
             },
             // sync info verification is on-demand (verified when it's used)
             UnverifiedEvent::SyncInfo(s) => VerifiedEvent::UnverifiedSyncInfo(s),
             UnverifiedEvent::BatchMsg(b) => {
-                if !self_message {
-                    b.verify(peer_id, max_num_batches)?;
-                }
+                // if !self_message {
+                //     b.verify(peer_id, max_num_batches)?;
+                // }
                 VerifiedEvent::BatchMsg(b)
             },
             UnverifiedEvent::SignedBatchInfo(sd) => {
-                if !self_message {
-                    sd.verify(peer_id, max_num_batches, validator)?;
-                }
+                // if !self_message {
+                //     sd.verify(
+                //         peer_id,
+                //         max_num_batches,
+                //         max_batch_expiry_gap_usecs,
+                //         validator,
+                //     )?;
+                // }
                 VerifiedEvent::SignedBatchInfo(sd)
             },
             UnverifiedEvent::ProofOfStoreMsg(p) => {
-                if !self_message {
-                    p.verify(max_num_batches, validator)?;
-                }
+                // if !self_message {
+                //     p.verify(max_num_batches, validator)?;
+                // }
                 VerifiedEvent::ProofOfStoreMsg(p)
             },
         })
@@ -481,17 +487,17 @@ impl RoundManager {
             );
             // Some information in SyncInfo is ahead of what we have locally.
             // First verify the SyncInfo (didn't verify it in the yet).
-            sync_info
-                .verify(&self.epoch_state().verifier)
-                .map_err(|e| {
-                    error!(
-                        SecurityEvent::InvalidSyncInfoMsg,
-                        sync_info = sync_info,
-                        remote_peer = author,
-                        error = ?e,
-                    );
-                    VerifyError::from(e)
-                })?;
+            // sync_info
+            //     .verify(&self.epoch_state().verifier)
+            //     .map_err(|e| {
+            //         error!(
+            //             SecurityEvent::InvalidSyncInfoMsg,
+            //             sync_info = sync_info,
+            //             remote_peer = author,
+            //             error = ?e,
+            //         );
+            //         VerifyError::from(e)
+            //     })?;
             let result = self
                 .block_store
                 .add_certs(sync_info, self.create_block_retriever(author))
@@ -869,22 +875,24 @@ impl RoundManager {
     /// 2. Add the vote to the pending votes and check whether it finishes a QC.
     /// 3. Once the QC/TC successfully formed, notify the RoundState.
     pub async fn process_vote_msg(&mut self, vote_msg: VoteMsg) -> anyhow::Result<()> {
-        fail_point!("consensus::process_vote_msg", |_| {
-            Err(anyhow::anyhow!("Injected error in process_vote_msg"))
-        });
         // Check whether this validator is a valid recipient of the vote.
-        if self
-            .ensure_round_and_sync_up(
+        let x = monitor!(
+            "process_vote_msg_sync",
+            self.ensure_round_and_sync_up(
                 vote_msg.vote().vote_data().proposed().round(),
                 vote_msg.sync_info(),
                 vote_msg.vote().author(),
             )
             .await
             .context("[RoundManager] Stop processing vote")?
-        {
-            self.process_vote(vote_msg.vote())
-                .await
-                .context("[RoundManager] Add a new vote")?;
+        );
+        if x {
+            monitor!(
+                "process_vote_msg",
+                self.process_vote(vote_msg.vote())
+                    .await
+                    .context("[RoundManager] Add a new vote")?
+            );
         }
         Ok(())
     }
