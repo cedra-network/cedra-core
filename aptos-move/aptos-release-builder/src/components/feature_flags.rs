@@ -131,6 +131,8 @@ pub enum FeatureFlag {
     FederatedKeyless,
     TransactionSimulationEnhancement,
     CollectionOwner,
+    LiteAccount,
+    DefaultToLiteAccount,
 }
 
 fn generate_features_blob(writer: &CodeWriter, data: &[u64]) {
@@ -347,6 +349,8 @@ impl From<FeatureFlag> for AptosFeatureFlag {
                 AptosFeatureFlag::TRANSACTION_SIMULATION_ENHANCEMENT
             },
             FeatureFlag::CollectionOwner => AptosFeatureFlag::COLLECTION_OWNER,
+            FeatureFlag::LiteAccount => AptosFeatureFlag::LITE_ACCOUNT,
+            FeatureFlag::DefaultToLiteAccount => AptosFeatureFlag::DEFAULT_TO_LITE_ACCOUNT,
         }
     }
 }
@@ -490,6 +494,8 @@ impl From<AptosFeatureFlag> for FeatureFlag {
                 FeatureFlag::TransactionSimulationEnhancement
             },
             AptosFeatureFlag::COLLECTION_OWNER => FeatureFlag::CollectionOwner,
+            AptosFeatureFlag::LITE_ACCOUNT => FeatureFlag::LiteAccount,
+            AptosFeatureFlag::DEFAULT_TO_LITE_ACCOUNT => FeatureFlag::DefaultToLiteAccount,
         }
     }
 }

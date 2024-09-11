@@ -1,18 +1,19 @@
 // Copyright © Aptos Foundation
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{
-    db_access::{Account, CoinStore, DbAccessUtil},
-    metrics::TIMER,
-};
+use crate::{db_access::DbAccessUtil, metrics::TIMER};
 use anyhow::Result;
 use aptos_executor::{
     block_executor::TransactionBlockExecutor, components::chunk_output::ChunkOutput,
 };
+use aptos_sdk::types::get_apt_primary_store_address;
 use aptos_storage_interface::cached_state_view::CachedStateView;
 use aptos_types::{
     account_address::AccountAddress,
-    account_config::{deposit::DepositEvent, withdraw::WithdrawEvent},
+    account_config::{
+        lite_account, lite_account::LiteAccountGroup, withdraw::WithdrawEvent,
+        FungibleStoreResource, ObjectGroupResource,
+    },
     block_executor::{config::BlockExecutorConfigFromOnchain, partitioner::ExecutableTransactions},
     contract_event::ContractEvent,
     event::EventKey,
@@ -21,17 +22,13 @@ use aptos_types::{
         ExecutionStatus, Transaction, TransactionAuxiliaryData, TransactionOutput,
         TransactionStatus,
     },
-    vm_status::AbortLocation,
     write_set::{WriteOp, WriteSet, WriteSetMut},
 };
-use move_core_types::{
-    ident_str,
-    language_storage::{ModuleId, TypeTag},
-    move_resource::MoveStructType,
-};
+use move_core_types::{language_storage::TypeTag, move_resource::MoveStructType};
 use once_cell::sync::{Lazy, OnceCell};
 use rayon::{prelude::*, ThreadPool, ThreadPoolBuilder};
 use std::collections::HashMap;
+use aptos_types::account_config::lite_account::AccountResource;
 
 struct IncrementalOutput {
     write_set: Vec<(StateKey, WriteOp)>,
@@ -95,28 +92,42 @@ impl NativeExecutor {
         transfer_amount: u64,
         state_view: &CachedStateView,
     ) -> Result<Result<IncrementalOutput, TransactionStatus>> {
-        let sender_account_key = DbAccessUtil::new_state_key_account(sender_address);
-        let mut sender_account = {
+        let mut sender_fungible_group = {
             let _timer = TIMER
-                .with_label_values(&["read_sender_account"])
+                .with_label_values(&["read_sender_fungible_store_resource_group"])
                 .start_timer();
-            DbAccessUtil::get_account(&sender_account_key, state_view)?.unwrap()
+            DbAccessUtil::get_fungible_store_group(&sender_address, state_view)?.unwrap()
         };
-        let sender_coin_store_key = DbAccessUtil::new_state_key_aptos_coin(sender_address);
-        let mut sender_coin_store = {
-            let _timer = TIMER
-                .with_label_values(&["read_sender_coin_store"])
-                .start_timer();
-            DbAccessUtil::get_coin_store(&sender_coin_store_key, state_view)?.unwrap()
+
+        let mut fungible_store = if let Some(fungible_store_resource) = sender_fungible_group
+            .group
+            .get_mut(&FungibleStoreResource::struct_tag())
+            .and_then(|bytes| Some(bcs::from_bytes(bytes).unwrap()))
+        {
+            fungible_store_resource
+        } else {
+            FungibleStoreResource::new(sender_address, 0, false)
         };
+
+        let mut lite_account = if let Some(lite_account_resource) = sender_fungible_group
+            .group
+            .get_mut(&AccountResource::struct_tag())
+            .and_then(|bytes| Some(bcs::from_bytes(bytes).unwrap()))
+        {
+            lite_account_resource
+        } else {
+            AccountResource { sequence_number: 0 }
+        };
+        lite_account.sequence_number += 1;
 
         // Note: numbers below may not be real. When runninng in parallel there might be conflicts.
-        sender_coin_store.coin -= transfer_amount;
+        fungible_store.balance -= transfer_amount;
 
         let gas = 1;
-        sender_coin_store.coin -= gas;
+        fungible_store.balance -= gas;
 
-        sender_account.sequence_number += 1;
+        sender_fungible_group.group.insert(AccountResource::struct_tag(), bcs::to_bytes(&lite_account).unwrap());
+        sender_fungible_group.group.insert(FungibleStoreResource::struct_tag(), bcs::to_bytes(&fungible_store).unwrap());
 
         // add total supply via aggregators?
         // let mut total_supply: u128 =
@@ -126,12 +137,11 @@ impl NativeExecutor {
         // TODO(grao): Add other reads to match the read set of the real transaction.
         let write_set = vec![
             (
-                sender_account_key,
-                WriteOp::legacy_modification(bcs::to_bytes(&sender_account)?.into()),
-            ),
-            (
-                sender_coin_store_key,
-                WriteOp::legacy_modification(bcs::to_bytes(&sender_coin_store)?.into()),
+                StateKey::resource_group(
+                    &get_apt_primary_store_address(sender_address),
+                    &ObjectGroupResource::struct_tag(),
+                ),
+                WriteOp::legacy_modification(bcs::to_bytes(&sender_fungible_group)?.into()),
             ),
             // (
             //     TOTAL_SUPPLY_STATE_KEY.clone(),
@@ -153,95 +163,48 @@ impl NativeExecutor {
         recipient_address: AccountAddress,
         transfer_amount: u64,
         state_view: &CachedStateView,
-        fail_on_existing: bool,
-        fail_on_missing: bool,
     ) -> Result<Result<IncrementalOutput, TransactionStatus>> {
-        let recipient_account_key = DbAccessUtil::new_state_key_account(recipient_address);
-        let recipient_coin_store_key = DbAccessUtil::new_state_key_aptos_coin(recipient_address);
+        let mut write_set = Vec::new();
 
-        let recipient_account = {
-            let _timer = TIMER.with_label_values(&["read_new_account"]).start_timer();
-            DbAccessUtil::get_account(&recipient_account_key, state_view)?
+        let mut recipient_fungible_store_group = {
+            let _timer = TIMER
+                .with_label_values(&["read_new_fungible_store_resource_group"])
+                .start_timer();
+            DbAccessUtil::get_fungible_store_group(&recipient_address, state_view)?
+                .unwrap_or_default()
         };
 
-        let mut write_set = Vec::new();
-        if recipient_account.is_some() {
-            if fail_on_existing {
-                return Ok(Err(TransactionStatus::Keep(ExecutionStatus::MoveAbort {
-                    location: AbortLocation::Module(ModuleId::new(
-                        AccountAddress::ONE,
-                        ident_str!("account").into(),
-                    )),
-                    code: 7,
-                    info: None,
-                })));
-            }
-
-            let mut recipient_coin_store = {
-                let _timer = TIMER
-                    .with_label_values(&["read_new_coin_store"])
-                    .start_timer();
-                DbAccessUtil::get_coin_store(&recipient_coin_store_key, state_view)?.unwrap()
-            };
-
-            if transfer_amount != 0 {
-                recipient_coin_store.coin += transfer_amount;
-
-                write_set.push((
-                    recipient_coin_store_key,
-                    WriteOp::legacy_modification(bcs::to_bytes(&recipient_coin_store)?.into()),
-                ));
-            }
+        let mut fungible_store = if let Some(fungible_store_resource) =
+            recipient_fungible_store_group
+                .group
+                .get(&FungibleStoreResource::struct_tag())
+                .and_then(|bytes| Some(bcs::from_bytes(bytes).unwrap()))
+        {
+            fungible_store_resource
         } else {
-            if fail_on_missing {
-                return Ok(Err(TransactionStatus::Keep(ExecutionStatus::MoveAbort {
-                    location: AbortLocation::Module(ModuleId::new(
-                        AccountAddress::ONE,
-                        ident_str!("account").into(),
-                    )),
-                    code: 8,
-                    info: None,
-                })));
-            }
+            FungibleStoreResource::new(recipient_address, 0, false)
+        };
 
-            {
-                let _timer = TIMER
-                    .with_label_values(&["read_new_coin_store"])
-                    .start_timer();
-                assert!(
-                    DbAccessUtil::get_coin_store(&recipient_coin_store_key, state_view)?.is_none()
-                );
-            }
+        if transfer_amount != 0 {
+            fungible_store.balance += transfer_amount;
 
-            let recipient_account = Account {
-                authentication_key: recipient_address.to_vec(),
-                ..Default::default()
-            };
-
-            let recipient_coin_store = CoinStore {
-                coin: transfer_amount,
-                ..Default::default()
-            };
-
+            recipient_fungible_store_group.insert(
+                FungibleStoreResource::struct_tag(),
+                bcs::to_bytes(&fungible_store).unwrap(),
+            );
             write_set.push((
-                recipient_account_key,
-                WriteOp::legacy_creation(bcs::to_bytes(&recipient_account)?.into()),
-            ));
-            write_set.push((
-                recipient_coin_store_key,
-                WriteOp::legacy_creation(bcs::to_bytes(&recipient_coin_store)?.into()),
+                StateKey::resource_group(
+                    &get_apt_primary_store_address(recipient_address),
+                    &ObjectGroupResource::struct_tag(),
+                ),
+                WriteOp::legacy_modification(recipient_fungible_store_group.to_bytes()?.into()),
             ));
         }
 
-        let events = vec![
-            ContractEvent::new_v1(
-                EventKey::new(0, recipient_address),
-                0,
-                TypeTag::Struct(Box::new(DepositEvent::struct_tag())),
-                recipient_address.to_vec(),
-            ), // TODO(grao): CoinRegisterEvent
-        ];
-        Ok(Ok(IncrementalOutput { write_set, events }))
+        Ok(Ok(IncrementalOutput {
+            write_set,
+            events: vec![],
+        }))
     }
 
     fn handle_account_creation_and_transfer(
@@ -249,8 +212,6 @@ impl NativeExecutor {
         recipient_address: AccountAddress,
         transfer_amount: u64,
         state_view: &CachedStateView,
-        fail_on_existing: bool,
-        fail_on_missing: bool,
     ) -> Result<TransactionOutput> {
         let _timer = TIMER.with_label_values(&["account_creation"]).start_timer();
 
@@ -262,13 +223,7 @@ impl NativeExecutor {
             }
         };
 
-        let deposit_output = Self::deposit(
-            recipient_address,
-            transfer_amount,
-            state_view,
-            fail_on_existing,
-            fail_on_missing,
-        )?;
+        let deposit_output = Self::deposit(recipient_address, transfer_amount, state_view)?;
 
         match deposit_output {
             Ok(deposit_output) => {
@@ -284,8 +239,6 @@ impl NativeExecutor {
         recipient_addresses: Vec<AccountAddress>,
         transfer_amounts: Vec<u64>,
         state_view: &CachedStateView,
-        fail_on_existing: bool,
-        fail_on_missing: bool,
     ) -> Result<TransactionOutput> {
         let mut deltas = HashMap::new();
         for (recipient, amount) in recipient_addresses
@@ -317,13 +270,8 @@ impl NativeExecutor {
 
         for (recipient_address, transfer_amount) in deltas.into_iter() {
             output.append({
-                let deposit_output = Self::deposit(
-                    recipient_address,
-                    transfer_amount as u64,
-                    state_view,
-                    fail_on_existing,
-                    fail_on_missing,
-                )?;
+                let deposit_output =
+                    Self::deposit(recipient_address, transfer_amount as u64, state_view)?;
 
                 match deposit_output {
                     Ok(deposit_output) => deposit_output,
@@ -374,8 +322,6 @@ impl TransactionBlockExecutor for NativeExecutor {
                                         bcs::from_bytes(&f.args()[0]).unwrap(),
                                         bcs::from_bytes(&f.args()[1]).unwrap(),
                                         &state_view,
-                                        false,
-                                        true,
                                     )
                                 },
                                 (AccountAddress::ONE, "aptos_account", "transfer") => {
@@ -384,8 +330,6 @@ impl TransactionBlockExecutor for NativeExecutor {
                                         bcs::from_bytes(&f.args()[0]).unwrap(),
                                         bcs::from_bytes(&f.args()[1]).unwrap(),
                                         &state_view,
-                                        false,
-                                        false,
                                     )
                                 },
                                 (AccountAddress::ONE, "aptos_account", "create_account") => {
@@ -394,8 +338,6 @@ impl TransactionBlockExecutor for NativeExecutor {
                                         bcs::from_bytes(&f.args()[0]).unwrap(),
                                         0,
                                         &state_view,
-                                        true,
-                                        false,
                                     )
                                 },
                                 (AccountAddress::ONE, "aptos_account", "batch_transfer") => {
@@ -404,8 +346,6 @@ impl TransactionBlockExecutor for NativeExecutor {
                                         bcs::from_bytes(&f.args()[0]).unwrap(),
                                         bcs::from_bytes(&f.args()[1]).unwrap(),
                                         &state_view,
-                                        false,
-                                        true,
                                     )
                                 },
                                 _ => unimplemented!(

@@ -3,21 +3,24 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::db_access::{CoinStore, DbAccessUtil};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use aptos_storage_interface::{state_view::LatestDbStateCheckpointView, DbReaderWriter};
 use aptos_transaction_generator_lib::{CounterState, ReliableTransactionSubmitter};
 use aptos_types::{
     account_address::AccountAddress,
-    account_config::AccountResource,
+    account_config::lite_account,
     state_store::MoveResourceExt,
     transaction::{SignedTransaction, Transaction},
 };
 use async_trait::async_trait;
+use move_core_types::move_resource::MoveStructType;
 use std::{
     collections::HashMap,
     sync::{atomic::AtomicUsize, mpsc},
     time::Duration,
 };
+use aptos_types::account_config::ObjectGroupResource;
+use aptos_types::transaction::authenticator::AuthenticationKey;
 
 pub struct DbReliableTransactionSubmitter {
     pub db: DbReaderWriter,
@@ -38,10 +41,18 @@ impl ReliableTransactionSubmitter for DbReliableTransactionSubmitter {
 
     async fn query_sequence_number(&self, address: AccountAddress) -> Result<u64> {
         let db_state_view = self.db.reader.latest_state_checkpoint_view().unwrap();
-        AccountResource::fetch_move_resource(&db_state_view, &address)
-            .unwrap()
-            .map(|account| account.sequence_number())
-            .context("account doesn't exist")
+        Ok(
+            match lite_account::AccountResource::fetch_move_resource_from_group(
+                &db_state_view,
+                &AuthenticationKey::object_address_from_object(&address, &AccountAddress::TEN).account_address(),
+                &ObjectGroupResource::struct_tag(),
+            )
+                .unwrap()
+            {
+                Some(account_resource) => account_resource.sequence_number,
+                None => 0,
+            },
+        )
     }
 
     async fn execute_transactions_with_counter(

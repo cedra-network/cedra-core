@@ -603,6 +603,28 @@ module std::features {
         is_enabled(COLLECTION_OWNER)
     }
 
+    /// Whether to use lite account as the default account.
+    ///
+    /// Lifetime: transient
+    const LITE_ACCOUNT: u64 = 80;
+
+    public fun get_lite_account_feature(): u64 { LITE_ACCOUNT }
+
+    public fun lite_account_enabled(): bool acquires Features {
+        is_enabled(LITE_ACCOUNT)
+    }
+
+    /// Whether to use lite account as the default account for query.
+    ///
+    /// Lifetime: transient
+    const DEFAULT_TO_LITE_ACCOUNT: u64 = 81;
+
+    public fun get_default_to_lite_account_feature(): u64 { DEFAULT_TO_LITE_ACCOUNT }
+
+    public fun default_to_lite_account_enabled(): bool acquires Features {
+        is_enabled(DEFAULT_TO_LITE_ACCOUNT)
+    }
+
     // ============================================================================================
     // Feature Flag Implementation
 

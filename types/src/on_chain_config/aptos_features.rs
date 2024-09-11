@@ -95,6 +95,8 @@ pub enum FeatureFlag {
     FEDERATED_KEYLESS = 77,
     TRANSACTION_SIMULATION_ENHANCEMENT = 78,
     COLLECTION_OWNER = 79,
+    LITE_ACCOUNT = 80,
+    DEFAULT_TO_LITE_ACCOUNT = 81,
 }
 
 impl FeatureFlag {
@@ -172,6 +174,7 @@ impl FeatureFlag {
             FeatureFlag::ENABLE_RESOURCE_ACCESS_CONTROL,
             FeatureFlag::REJECT_UNSTABLE_BYTECODE_FOR_SCRIPT,
             FeatureFlag::TRANSACTION_SIMULATION_ENHANCEMENT,
+            FeatureFlag::LITE_ACCOUNT,
         ]
     }
 }

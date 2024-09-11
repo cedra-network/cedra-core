@@ -9,12 +9,21 @@ use move_core_types::account_address::AccountAddress;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::path::PathBuf;
+use aptos_sdk::types::get_apt_primary_store_address;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_get_account_resource() {
     let mut context = new_test_context(current_function_name!());
+    // create root lite account resource.
+    let user = &mut context.gen_account();
+    let txn1 = context.mint_user_account(user).await;
+    context.commit_block(&vec![txn1]).await;
+    let root = context.root_account().await;
     let resp = context
-        .get(&get_account_resource("0xA550C18", "0x1::account::Account"))
+        .get(&get_account_resource(
+            &get_apt_primary_store_address(root.address()).to_standard_string(),
+            "0x1::lite_account::Account",
+        ))
         .await;
     context.check_golden_output(resp);
 }
@@ -68,11 +77,16 @@ async fn test_get_account_resource_struct_tag_not_found() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_get_account_resource_with_version() {
     let mut context = new_test_context(current_function_name!());
+    // create root lite account resource.
+    let user = &mut context.gen_account();
+    let txn1 = context.mint_user_account(user).await;
+    context.commit_block(&vec![txn1]).await;
+    let root = context.root_account().await;
     let ledger_version = context.get_latest_ledger_info().version();
     let resp = context
         .get(&get_account_resource_with_version(
-            "0xA550C18",
-            "0x1::account::Account",
+            &get_apt_primary_store_address(root.address()).to_standard_string(),
+            "0x1::lite_account::Account",
             ledger_version,
         ))
         .await;
@@ -192,7 +206,7 @@ async fn test_merkle_leaves_with_nft_transfer() {
         .unwrap();
     assert_eq!(
         num_leaves_after_transfer_nft,
-        num_leaves_at_beginning + 2  /* 1 token store + 1 token*/ + num_block_resource
+        num_leaves_at_beginning + 2 /* 1 token store + 1 token */ + num_block_resource
     );
 
     let transfer_to_creator_txn = owner.sign_multi_agent_with_transaction_builder(
