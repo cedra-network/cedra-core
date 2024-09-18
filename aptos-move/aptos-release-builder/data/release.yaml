@@ -1,26 +1,19 @@
 ---
-remote_endpoint: ~
-name: "v1.12"
+remote_endpoint: https://fullnode.mainnet.aptoslabs.com
+name: "TBD"
 proposals:
-  - name: step_1_increase_max_txn_gas
+  - name: proposal_1_upgrade_framework
     metadata:
-      title: "Increase max txn gas temporarily for framework upgrade"
-      description: "Increase max txn gas temporarily for framework upgrade"
+      title: "Multi-step proposal to upgrade mainnet framework, version TBD"
+      description: "This includes changes in (TBA: URL to changes)"
     execution_mode: MultiStep
     update_sequence:
-      - DefaultGasWithOverride:
-          feature_version: 16
-          overrides:
-            - name: "txn.max_execution_gas"
-              value: 4000000000
-  - name: step_2_upgrade_framework
-    metadata:
-      title: "Multi-step proposal to upgrade mainnet framework to v1.12"
-      description: "This includes changes in https://github.com/aptos-labs/aptos-core/commits/aptos-release-v1.12"
-    execution_mode: MultiStep
-    update_sequence:
+      - Gas:
+          new: current
       - Framework:
           bytecode_version: 6
           git_hash: ~
-      - DefaultGasWithOverride:
-          feature_version: 17
+      - FeatureFlag:
+          enabled:
+            - allow_serialized_script_args
+

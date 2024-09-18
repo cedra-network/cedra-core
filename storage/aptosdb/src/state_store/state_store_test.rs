@@ -23,6 +23,7 @@ use aptos_types::{
     account_config::{AccountResource, ChainIdResource, CoinInfoResource, CoinStoreResource},
     nibble::nibble_path::NibblePath,
     state_store::state_key::inner::StateKeyTag,
+    AptosCoinType,
 };
 use arr_macro::arr;
 use proptest::{collection::hash_map, prelude::*};
@@ -58,7 +59,6 @@ fn put_value_set(
             None,
             &ledger_batch,
             &sharded_state_kv_batches,
-            &state_kv_metadata_batch,
             /*put_state_value_indices=*/ false,
             /*skip_usage=*/ false,
             /*last_checkpoint_index=*/ None,
@@ -218,7 +218,7 @@ fn test_get_values_by_key_prefix() {
     assert_eq!(*key_value_map.get(&key1).unwrap(), value1_v0);
     assert_eq!(*key_value_map.get(&key2).unwrap(), value2_v0);
 
-    let key4 = StateKey::resource_typed::<CoinInfoResource>(&address).unwrap();
+    let key4 = StateKey::resource_typed::<CoinInfoResource<AptosCoinType>>(&address).unwrap();
 
     let value2_v1 = StateValue::from(String::from("value2_v1").into_bytes());
     let value4_v1 = StateValue::from(String::from("value4_v1").into_bytes());
@@ -248,7 +248,7 @@ fn test_get_values_by_key_prefix() {
 
     // Add values for one more account and verify the state
     let address1 = AccountAddress::new([22u8; AccountAddress::LENGTH]);
-    let key5 = StateKey::resource_typed::<CoinStoreResource>(&address1).unwrap();
+    let key5 = StateKey::resource_typed::<CoinStoreResource<AptosCoinType>>(&address1).unwrap();
     let value5_v2 = StateValue::from(String::from("value5_v2").into_bytes());
 
     let account1_key_prefix = StateKeyPrefix::new(StateKeyTag::AccessPath, address1.to_vec());
@@ -354,7 +354,7 @@ proptest! {
         for i in 0..kvs.len() {
             let actual_values = db
                 .get_backup_handler()
-                .get_account_iter(i as Version)
+                .get_state_item_iter(i as Version, 0, usize::MAX)
                 .unwrap()
                 .collect::<Result<Vec<_>>>()
                 .unwrap();
@@ -531,7 +531,7 @@ proptest! {
             let last_version = next_version - 1;
             let snapshot = db
                 .get_backup_handler()
-                .get_account_iter(last_version)
+                .get_state_item_iter(last_version, 0, usize::MAX)
                 .unwrap()
                 .collect::<Result<Vec<_>>>()
                 .unwrap();

@@ -6,15 +6,14 @@
 ///
 module aptos_token_objects::token {
     use std::error;
-    use std::option::{Self, Option};
     use std::features;
+    use std::option::{Self, Option};
     use std::string::{Self, String};
     use std::signer;
     use std::vector;
     use aptos_framework::aggregator_v2::{Self, AggregatorSnapshot, DerivedStringSnapshot};
     use aptos_framework::event;
     use aptos_framework::object::{Self, ConstructorRef, Object};
-    use aptos_std::string_utils::{to_string};
     use aptos_token_objects::collection::{Self, Collection};
     use aptos_token_objects::royalty::{Self, Royalty};
 
@@ -35,6 +34,10 @@ module aptos_token_objects::token {
     const EDESCRIPTION_TOO_LONG: u64 = 6;
     /// The seed is over the maximum length
     const ESEED_TOO_LONG: u64 = 7;
+    /// The calling signer is not the owner
+    const ENOT_OWNER: u64 = 8;
+    /// The collection owner feature is not supported
+    const ECOLLECTION_OWNER_NOT_SUPPORTED: u64 = 9;
 
     const MAX_TOKEN_NAME_LENGTH: u64 = 128;
     const MAX_TOKEN_SEED_LENGTH: u64 = 128;
@@ -47,7 +50,7 @@ module aptos_token_objects::token {
         /// The collection from which this token resides.
         collection: Object<Collection>,
         /// Deprecated in favor of `index` inside TokenIdentifiers.
-        /// Will be populated until concurrent_token_v2_enabled feature flag is enabled.
+        /// Was populated until concurrent_token_v2_enabled feature flag was enabled.
         ///
         /// Unique identifier within the collection, optional, 0 means unassigned
         index: u64,
@@ -55,7 +58,7 @@ module aptos_token_objects::token {
         /// A brief description of the token.
         description: String,
         /// Deprecated in favor of `name` inside TokenIdentifiers.
-        /// Will be populated until concurrent_token_v2_enabled feature flag is enabled.
+        /// Was populated until concurrent_token_v2_enabled feature flag was enabled.
         ///
         /// The name of the token, which should be unique within the collection; the length of name
         /// should be smaller than 128, characters, eg: "Aptos Animal #1234"
@@ -70,7 +73,7 @@ module aptos_token_objects::token {
 
     #[resource_group_member(group = aptos_framework::object::ObjectGroup)]
     /// Represents first addition to the common fields for all tokens
-    /// Starts being populated once aggregator_v2_api_enabled is enabled.
+    /// Started being populated once aggregator_v2_api_enabled was enabled.
     struct TokenIdentifiers has key {
         /// Unique identifier within the collection, optional, 0 means unassigned
         index: AggregatorSnapshot<u64>,
@@ -117,9 +120,87 @@ module aptos_token_objects::token {
     }
 
     inline fun create_common(
+        creator: &signer,
         constructor_ref: &ConstructorRef,
-        creator_address: address,
         collection_name: String,
+        description: String,
+        name_prefix: String,
+        // If option::some, numbered token is created - i.e. index is appended to the name.
+        // If option::none, name_prefix is the full name of the token.
+        name_with_index_suffix: Option<String>,
+        royalty: Option<Royalty>,
+        uri: String,
+    ) {
+        let creator_address = signer::address_of(creator);
+        let collection_addr = collection::create_collection_address(&creator_address, &collection_name);
+        let collection = object::address_to_object<Collection>(collection_addr);
+
+        create_common_with_collection(
+            creator,
+            constructor_ref,
+            collection,
+            description,
+            name_prefix,
+            name_with_index_suffix,
+            royalty,
+            uri
+        )
+    }
+
+    inline fun create_common_with_collection(
+        creator: &signer,
+        constructor_ref: &ConstructorRef,
+        collection: Object<Collection>,
+        description: String,
+        name_prefix: String,
+        // If option::some, numbered token is created - i.e. index is appended to the name.
+        // If option::none, name_prefix is the full name of the token.
+        name_with_index_suffix: Option<String>,
+        royalty: Option<Royalty>,
+        uri: String,
+    ) {
+        assert!(collection::creator(collection) == signer::address_of(creator), error::unauthenticated(ENOT_CREATOR));
+
+        create_common_with_collection_internal(
+            constructor_ref,
+            collection,
+            description,
+            name_prefix,
+            name_with_index_suffix,
+            royalty,
+            uri
+        );
+    }
+
+    inline fun create_common_with_collection_as_owner(
+        owner: &signer,
+        constructor_ref: &ConstructorRef,
+        collection: Object<Collection>,
+        description: String,
+        name_prefix: String,
+        // If option::some, numbered token is created - i.e. index is appended to the name.
+        // If option::none, name_prefix is the full name of the token.
+        name_with_index_suffix: Option<String>,
+        royalty: Option<Royalty>,
+        uri: String,
+    ) {
+        assert!(features::is_collection_owner_enabled(), error::unavailable(ECOLLECTION_OWNER_NOT_SUPPORTED));
+        assert!(object::owner(collection) == signer::address_of(owner), error::unauthenticated(ENOT_OWNER));
+
+        create_common_with_collection_internal(
+            constructor_ref,
+            collection,
+            description,
+            name_prefix,
+            name_with_index_suffix,
+            royalty,
+            uri
+        );
+    }
+
+    inline fun create_common_with_collection_internal(
+        constructor_ref: &ConstructorRef,
+        collection: Object<Collection>,
         description: String,
         name_prefix: String,
         // If option::some, numbered token is created - i.e. index is appended to the name.
@@ -144,68 +225,26 @@ module aptos_token_objects::token {
 
         let object_signer = object::generate_signer(constructor_ref);
 
-        let collection_addr = collection::create_collection_address(&creator_address, &collection_name);
-        let collection = object::address_to_object<Collection>(collection_addr);
+        let index = option::destroy_with_default(
+            collection::increment_supply(&collection, signer::address_of(&object_signer)),
+            aggregator_v2::create_snapshot<u64>(0)
+        );
 
-        // TODO[agg_v2](cleanup) once this flag is enabled, cleanup code for aggregator_api_enabled = false.
-        // Flag which controls whether any functions from aggregator_v2 module can be called.
-        let aggregator_api_enabled = features::aggregator_v2_api_enabled();
-        // Flag which controls whether we are going to still continue writing to deprecated fields.
-        let concurrent_token_v2_enabled = features::concurrent_token_v2_enabled();
-
-        let (deprecated_index, deprecated_name) = if (aggregator_api_enabled) {
-            let index = option::destroy_with_default(
-                collection::increment_concurrent_supply(&collection, signer::address_of(&object_signer)),
-                aggregator_v2::create_snapshot<u64>(0)
-            );
-
-            // If create_numbered_token called us, add index to the name.
-            let name = if (option::is_some(&name_with_index_suffix)) {
-                aggregator_v2::derive_string_concat(name_prefix, &index, option::extract(&mut name_with_index_suffix))
-            } else {
-                aggregator_v2::create_derived_string(name_prefix)
-            };
-
-            // Until concurrent_token_v2_enabled is enabled, we still need to write to deprecated fields.
-            // Otherwise we put empty values there.
-            // (we need to do these calls before creating token_concurrent, to avoid copying objects)
-            let deprecated_index = if (concurrent_token_v2_enabled) {
-                0
-            } else {
-                aggregator_v2::read_snapshot(&index)
-            };
-            let deprecated_name = if (concurrent_token_v2_enabled) {
-                string::utf8(b"")
-            } else {
-                aggregator_v2::read_derived_string(&name)
-            };
-
-            // If aggregator_api_enabled, we always populate newly added fields
-            let token_concurrent = TokenIdentifiers {
-                index,
-                name,
-            };
-            move_to(&object_signer, token_concurrent);
-
-            (deprecated_index, deprecated_name)
+        // If create_numbered_token called us, add index to the name.
+        let name = if (option::is_some(&name_with_index_suffix)) {
+            aggregator_v2::derive_string_concat(name_prefix, &index, option::extract(&mut name_with_index_suffix))
         } else {
-            // If aggregator_api_enabled is disabled, we cannot use increment_concurrent_supply or
-            // create TokenIdentifiers, so we fallback to the old behavior.
-            let id = collection::increment_supply(&collection, signer::address_of(&object_signer));
-            let index = option::get_with_default(&mut id, 0);
-
-            // If create_numbered_token called us, add index to the name.
-            let name = if (option::is_some(&name_with_index_suffix)) {
-                let name = name_prefix;
-                string::append(&mut name, to_string<u64>(&index));
-                string::append(&mut name, option::extract(&mut name_with_index_suffix));
-                name
-            } else {
-                name_prefix
-            };
-
-            (index, name)
+            aggregator_v2::create_derived_string(name_prefix)
         };
+
+        let deprecated_index = 0;
+        let deprecated_name = string::utf8(b"");
+
+        let token_concurrent = TokenIdentifiers {
+            index,
+            name,
+        };
+        move_to(&object_signer, token_concurrent);
 
         let token = Token {
             collection,
@@ -225,6 +264,7 @@ module aptos_token_objects::token {
     /// Creates a new token object with a unique address and returns the ConstructorRef
     /// for additional specialization.
     /// This takes in the collection object instead of the collection name.
+    /// This function must be called if the collection name has been previously changed.
     public fun create_token(
         creator: &signer,
         collection: Object<Collection>,
@@ -233,7 +273,19 @@ module aptos_token_objects::token {
         royalty: Option<Royalty>,
         uri: String,
     ): ConstructorRef {
-        create(creator, collection::name(collection), description, name, royalty, uri)
+        let creator_address = signer::address_of(creator);
+        let constructor_ref = object::create_object(creator_address);
+        create_common_with_collection(
+            creator,
+            &constructor_ref,
+            collection,
+            description,
+            name,
+            option::none(),
+            royalty,
+            uri
+        );
+        constructor_ref
     }
 
     /// Creates a new token object with a unique address and returns the ConstructorRef
@@ -249,9 +301,33 @@ module aptos_token_objects::token {
         let creator_address = signer::address_of(creator);
         let constructor_ref = object::create_object(creator_address);
         create_common(
+            creator,
             &constructor_ref,
-            creator_address,
             collection_name,
+            description,
+            name,
+            option::none(),
+            royalty,
+            uri
+        );
+        constructor_ref
+    }
+
+    /// Same functionality as `create_token`, but the token can only be created by the collection owner.
+    public fun create_token_as_collection_owner(
+        creator: &signer,
+        collection: Object<Collection>,
+        description: String,
+        name: String,
+        royalty: Option<Royalty>,
+        uri: String,
+    ): ConstructorRef {
+        let creator_address = signer::address_of(creator);
+        let constructor_ref = object::create_object(creator_address);
+        create_common_with_collection_as_owner(
+            creator,
+            &constructor_ref,
+            collection,
             description,
             name,
             option::none(),
@@ -264,10 +340,11 @@ module aptos_token_objects::token {
     /// Creates a new token object with a unique address and returns the ConstructorRef
     /// for additional specialization.
     /// The name is created by concatenating the (name_prefix, index, name_suffix).
-    /// After flag concurrent_token_v2_enabled is enabled, this function will allow
-    /// creating tokens in parallel, from the same collection, while providing sequential names.
+    /// This function allows creating tokens in parallel, from the same collection,
+    /// while providing sequential names.
     ///
     /// This takes in the collection object instead of the collection name.
+    /// This function must be called if the collection name has been previously changed.
     public fun create_numbered_token_object(
         creator: &signer,
         collection: Object<Collection>,
@@ -277,14 +354,26 @@ module aptos_token_objects::token {
         royalty: Option<Royalty>,
         uri: String,
     ): ConstructorRef {
-        create_numbered_token(creator, collection::name(collection), description, name_with_index_prefix, name_with_index_suffix, royalty, uri)
+        let creator_address = signer::address_of(creator);
+        let constructor_ref = object::create_object(creator_address);
+        create_common_with_collection(
+            creator,
+            &constructor_ref,
+            collection,
+            description,
+            name_with_index_prefix,
+            option::some(name_with_index_suffix),
+            royalty,
+            uri
+        );
+        constructor_ref
     }
 
     /// Creates a new token object with a unique address and returns the ConstructorRef
     /// for additional specialization.
     /// The name is created by concatenating the (name_prefix, index, name_suffix).
-    /// After flag concurrent_token_v2_enabled is enabled, this function will allow
-    /// creating tokens in parallel, from the same collection, while providing sequential names.
+    /// This function will allow creating tokens in parallel, from the same collection,
+    /// while providing sequential names.
     public fun create_numbered_token(
         creator: &signer,
         collection_name: String,
@@ -297,9 +386,34 @@ module aptos_token_objects::token {
         let creator_address = signer::address_of(creator);
         let constructor_ref = object::create_object(creator_address);
         create_common(
+            creator,
             &constructor_ref,
-            creator_address,
             collection_name,
+            description,
+            name_with_index_prefix,
+            option::some(name_with_index_suffix),
+            royalty,
+            uri
+        );
+        constructor_ref
+    }
+
+    /// Same functionality as `create_numbered_token_object`, but the token can only be created by the collection owner.
+    public fun create_numbered_token_as_collection_owner(
+        creator: &signer,
+        collection: Object<Collection>,
+        description: String,
+        name_with_index_prefix: String,
+        name_with_index_suffix: String,
+        royalty: Option<Royalty>,
+        uri: String,
+    ): ConstructorRef {
+        let creator_address = signer::address_of(creator);
+        let constructor_ref = object::create_object(creator_address);
+        create_common_with_collection_as_owner(
+            creator,
+            &constructor_ref,
+            collection,
             description,
             name_with_index_prefix,
             option::some(name_with_index_suffix),
@@ -311,6 +425,7 @@ module aptos_token_objects::token {
 
     /// Creates a new token object from a token name and returns the ConstructorRef for
     /// additional specialization.
+    /// This function must be called if the collection name has been previously changed.
     public fun create_named_token_object(
         creator: &signer,
         collection: Object<Collection>,
@@ -319,7 +434,19 @@ module aptos_token_objects::token {
         royalty: Option<Royalty>,
         uri: String,
     ): ConstructorRef {
-        create_named_token(creator, collection::name(collection), description, name, royalty, uri)
+        let seed = create_token_seed(&collection::name(collection), &name);
+        let constructor_ref = object::create_named_object(creator, seed);
+        create_common_with_collection(
+            creator,
+            &constructor_ref,
+            collection,
+            description,
+            name,
+            option::none(),
+            royalty,
+            uri
+        );
+        constructor_ref
     }
 
     /// Creates a new token object from a token name and returns the ConstructorRef for
@@ -332,14 +459,37 @@ module aptos_token_objects::token {
         royalty: Option<Royalty>,
         uri: String,
     ): ConstructorRef {
-        let creator_address = signer::address_of(creator);
         let seed = create_token_seed(&collection_name, &name);
 
         let constructor_ref = object::create_named_object(creator, seed);
         create_common(
+            creator,
             &constructor_ref,
-            creator_address,
             collection_name,
+            description,
+            name,
+            option::none(),
+            royalty,
+            uri
+        );
+        constructor_ref
+    }
+
+    /// Same functionality as `create_named_token_object`, but the token can only be created by the collection owner.
+    public fun create_named_token_as_collection_owner(
+        creator: &signer,
+        collection: Object<Collection>,
+        description: String,
+        name: String,
+        royalty: Option<Royalty>,
+        uri: String,
+    ): ConstructorRef {
+        let seed = create_token_seed(&collection::name(collection), &name);
+        let constructor_ref = object::create_named_object(creator, seed);
+        create_common_with_collection_as_owner(
+            creator,
+            &constructor_ref,
+            collection,
             description,
             name,
             option::none(),
@@ -351,6 +501,7 @@ module aptos_token_objects::token {
 
     /// Creates a new token object from a token name and seed.
     /// Returns the ConstructorRef for additional specialization.
+    /// This function must be called if the collection name has been previously changed.
     public fun create_named_token_from_seed(
         creator: &signer,
         collection: Object<Collection>,
@@ -360,11 +511,34 @@ module aptos_token_objects::token {
         royalty: Option<Royalty>,
         uri: String,
     ): ConstructorRef {
-        let creator_address = signer::address_of(creator);
         let seed = create_token_name_with_seed(&collection::name(collection), &name, &seed);
-
         let constructor_ref = object::create_named_object(creator, seed);
-        create_common(&constructor_ref, creator_address, collection::name(collection), description, name, option::none(), royalty, uri);
+        create_common_with_collection(creator, &constructor_ref, collection, description, name, option::none(), royalty, uri);
+        constructor_ref
+    }
+
+    /// Same functionality as `create_named_token_from_seed`, but the token can only be created by the collection owner.
+    public fun create_named_token_from_seed_as_collection_owner(
+        creator: &signer,
+        collection: Object<Collection>,
+        description: String,
+        name: String,
+        seed: String,
+        royalty: Option<Royalty>,
+        uri: String,
+    ): ConstructorRef {
+        let seed = create_token_name_with_seed(&collection::name(collection), &name, &seed);
+        let constructor_ref = object::create_named_object(creator, seed);
+        create_common_with_collection_as_owner(
+            creator,
+            &constructor_ref,
+            collection,
+            description,
+            name,
+            option::none(),
+            royalty,
+            uri
+        );
         constructor_ref
     }
 
@@ -381,11 +555,10 @@ module aptos_token_objects::token {
         royalty: Option<Royalty>,
         uri: String,
     ): ConstructorRef {
-        let creator_address = signer::address_of(creator);
         let constructor_ref = object::create_object_from_account(creator);
         create_common(
+            creator,
             &constructor_ref,
-            creator_address,
             collection_name,
             description,
             name,
@@ -699,6 +872,101 @@ module aptos_token_objects::token {
         assert!(option::some(expected_royalty) == royalty(token), 2);
     }
 
+    #[test(creator = @0x123, trader = @0x456, aptos_framework = @aptos_framework)]
+    fun test_create_and_transfer_token_as_collection_owner(creator: &signer, trader: &signer, aptos_framework: &signer) acquires Token {
+        features::change_feature_flags_for_testing(aptos_framework, vector[features::get_collection_owner_feature()], vector[]);
+        let collection_name = string::utf8(b"collection name");
+        let token_name = string::utf8(b"token name");
+
+        let extend_ref = create_collection_as_collection_owner_helper(creator, collection_name, 1);
+        let collection = get_collection_from_ref(&extend_ref);
+        create_named_token_as_collection_owner_helper(creator, collection, token_name);
+
+        let creator_address = signer::address_of(creator);
+        let token_addr = create_token_address(&creator_address, &collection_name, &token_name);
+        let token = object::address_to_object<Token>(token_addr);
+        assert!(object::owner(token) == creator_address, 1);
+        object::transfer(creator, token, signer::address_of(trader));
+        assert!(object::owner(token) == signer::address_of(trader), 1);
+
+        let expected_royalty = royalty::create(25, 10000, creator_address);
+        assert!(option::some(expected_royalty) == royalty(token), 2);
+    }
+
+    #[test(creator = @0x123, trader = @0x456)]
+    #[expected_failure(abort_code = 0x40002, location = aptos_token_objects::token)]
+    fun test_create_token_non_creator(creator: &signer, trader: &signer) {
+        let constructor_ref = &create_fixed_collection(creator, string::utf8(b"collection name"), 5);
+        let collection = get_collection_from_ref(&object::generate_extend_ref(constructor_ref));
+        create_token(
+            trader, collection, string::utf8(b"token description"), string::utf8(b"token name"),
+            option::some(royalty::create(25, 10000, signer::address_of(creator))), string::utf8(b"uri"),
+        );
+    }
+
+    #[test(creator = @0x123, trader = @0x456, aptos_framework = @aptos_framework)]
+    #[expected_failure(abort_code = 0x40008, location = aptos_token_objects::token)]
+    fun test_create_token_non_collection_owner(creator: &signer, trader: &signer, aptos_framework: &signer) {
+        features::change_feature_flags_for_testing(aptos_framework, vector[features::get_collection_owner_feature()], vector[]);
+        let constructor_ref = &create_fixed_collection_as_collection_owner(creator, string::utf8(b"collection name"), 5);
+        let collection = get_collection_from_ref(&object::generate_extend_ref(constructor_ref));
+        create_token_as_collection_owner(
+            trader, collection, string::utf8(b"token description"), string::utf8(b"token name"),
+            option::some(royalty::create(25, 10000, signer::address_of(creator))), string::utf8(b"uri"),
+        );
+    }
+
+    #[test(creator = @0x123, trader = @0x456)]
+    #[expected_failure(abort_code = 0x40002, location = aptos_token_objects::token)]
+    fun test_create_named_token_non_creator(creator: &signer, trader: &signer) {
+        let constructor_ref = &create_fixed_collection(creator, string::utf8(b"collection name"), 5);
+        let collection = get_collection_from_ref(&object::generate_extend_ref(constructor_ref));
+        create_token_with_collection_helper(trader, collection, string::utf8(b"token name"));
+    }
+
+    #[test(creator = @0x123, trader = @0x456, aptos_framework = @aptos_framework)]
+    #[expected_failure(abort_code = 0x40008, location = aptos_token_objects::token)]
+    fun test_create_named_token_non_collection_owner(creator: &signer, trader: &signer, aptos_framework: &signer) {
+        features::change_feature_flags_for_testing(aptos_framework, vector[features::get_collection_owner_feature()], vector[]);
+        let constructor_ref = &create_fixed_collection_as_collection_owner(creator, string::utf8(b"collection name"), 5);
+        let collection = get_collection_from_ref(&object::generate_extend_ref(constructor_ref));
+        create_named_token_as_collection_owner_helper(trader, collection, string::utf8(b"token name"));
+    }
+
+    #[test(creator = @0x123, trader = @0x456)]
+    #[expected_failure(abort_code = 0x40002, location = aptos_token_objects::token)]
+    fun test_create_named_token_object_non_creator(creator: &signer, trader: &signer) {
+        let constructor_ref = &create_fixed_collection(creator, string::utf8(b"collection name"), 5);
+        let collection = get_collection_from_ref(&object::generate_extend_ref(constructor_ref));
+        create_named_token_object(
+            trader, collection, string::utf8(b"token description"), string::utf8(b"token name"),
+            option::some(royalty::create(25, 10000, signer::address_of(creator))), string::utf8(b"uri"),
+        );
+    }
+
+    #[test(creator = @0x123, trader = @0x456)]
+    #[expected_failure(abort_code = 0x40002, location = aptos_token_objects::token)]
+    fun test_create_named_token_from_seed_non_creator(creator: &signer, trader: &signer) {
+        let constructor_ref = &create_fixed_collection(creator, string::utf8(b"collection name"), 5);
+        let collection = get_collection_from_ref(&object::generate_extend_ref(constructor_ref));
+        create_named_token_object(
+            trader, collection, string::utf8(b"token description"), string::utf8(b"token name"),
+            option::some(royalty::create(25, 10000, signer::address_of(creator))), string::utf8(b"uri"),
+        );
+    }
+
+    #[test(creator = @0x123, trader = @0x456, aptos_framework = @aptos_framework)]
+    #[expected_failure(abort_code = 0x40008, location = aptos_token_objects::token)]
+    fun test_create_named_token_from_seed_non_collection_owner(creator: &signer, trader: &signer, aptos_framework: &signer) {
+        features::change_feature_flags_for_testing(aptos_framework, vector[features::get_collection_owner_feature()], vector[]);
+        let constructor_ref = &create_fixed_collection_as_collection_owner(creator, string::utf8(b"collection name"), 5);
+        let collection = get_collection_from_ref(&object::generate_extend_ref(constructor_ref));
+        create_named_token_as_collection_owner(
+            trader, collection, string::utf8(b"token description"), string::utf8(b"token name"),
+            option::some(royalty::create(25, 10000, signer::address_of(creator))), string::utf8(b"uri"),
+        );
+    }
+
     #[test(creator = @0x123, trader = @0x456)]
     fun test_create_and_transfer_token_with_seed(creator: &signer, trader: &signer) acquires Token {
         let collection_name = string::utf8(b"collection name");
@@ -719,6 +987,45 @@ module aptos_token_objects::token {
 
         let expected_royalty = royalty::create(25, 10000, creator_address);
         assert!(option::some(expected_royalty) == royalty(token), 2);
+    }
+
+    #[test(creator = @0x123, trader = @0x456, aptos_framework = @aptos_framework)]
+    #[expected_failure(abort_code = 0x40008, location = aptos_token_objects::token)]
+    fun test_create_token_after_transferring_collection(creator: &signer, trader: &signer, aptos_framework: &signer) {
+        features::change_feature_flags_for_testing(aptos_framework, vector[features::get_collection_owner_feature()], vector[]);
+        let constructor_ref = &create_fixed_collection_as_collection_owner(creator, string::utf8(b"collection name"), 5);
+        let collection = get_collection_from_ref(&object::generate_extend_ref(constructor_ref));
+        create_token_as_collection_owner(
+            creator, collection, string::utf8(b"token description"), string::utf8(b"token name"),
+            option::some(royalty::create(25, 10000, signer::address_of(creator))), string::utf8(b"uri"),
+        );
+
+        object::transfer(creator, collection, signer::address_of(trader));
+
+        // This should fail as the collection is no longer owned by the creator.
+        create_token_as_collection_owner(
+            creator, collection, string::utf8(b"token description"), string::utf8(b"token name"),
+            option::some(royalty::create(25, 10000, signer::address_of(creator))), string::utf8(b"uri"),
+        );
+    }
+
+    #[test(creator = @0x123, trader = @0x456, aptos_framework = @aptos_framework)]
+    fun create_token_works_with_new_collection_owner(creator: &signer, trader: &signer, aptos_framework: &signer) {
+        features::change_feature_flags_for_testing(aptos_framework, vector[features::get_collection_owner_feature()], vector[]);
+        let constructor_ref = &create_fixed_collection_as_collection_owner(creator, string::utf8(b"collection name"), 5);
+        let collection = get_collection_from_ref(&object::generate_extend_ref(constructor_ref));
+        create_token_as_collection_owner(
+            creator, collection, string::utf8(b"token description"), string::utf8(b"token name"),
+            option::some(royalty::create(25, 10000, signer::address_of(creator))), string::utf8(b"uri"),
+        );
+
+        object::transfer(creator, collection, signer::address_of(trader));
+
+        // This should pass as `trader` is the new collection owner
+        create_token_as_collection_owner(
+            trader, collection, string::utf8(b"token description"), string::utf8(b"token name"),
+            option::some(royalty::create(25, 10000, signer::address_of(creator))), string::utf8(b"uri"),
+        );
     }
 
     #[test(creator = @0x123)]
@@ -925,13 +1232,9 @@ module aptos_token_objects::token {
         assert!(!object::is_object(token_addr), 2);
     }
 
-    #[test(creator = @0x123, fx = @std)]
-    fun test_create_burn_and_delete(creator: &signer, fx: signer) acquires Token, TokenIdentifiers {
+    #[test(creator = @0x123)]
+    fun test_create_burn_and_delete(creator: &signer) acquires Token, TokenIdentifiers {
         use aptos_framework::account;
-        use std::features;
-
-        let feature = features::get_auids();
-        features::change_feature_flags_for_testing(&fx, vector[feature], vector[]);
 
         let collection_name = string::utf8(b"collection name");
         let token_name = string::utf8(b"token name");
@@ -955,16 +1258,8 @@ module aptos_token_objects::token {
         assert!(!object::is_object(token_addr), 2);
     }
 
-    #[test(fx = @aptos_framework, creator = @0x123)]
-    fun test_upgrade_to_concurrent_and_numbered_tokens(fx: &signer, creator: &signer) acquires Token, TokenIdentifiers {
-        use std::debug;
-
-        let feature = features::get_concurrent_token_v2_feature();
-        let agg_feature = features::get_aggregator_v2_api_feature();
-        let auid_feature = features::get_auids();
-        let module_event_feature = features::get_module_event_feature();
-        features::change_feature_flags_for_testing(fx, vector[auid_feature, module_event_feature], vector[feature, agg_feature]);
-
+    #[test(creator = @0x123)]
+    fun test_upgrade_to_concurrent_and_numbered_tokens(creator: &signer) acquires Token, TokenIdentifiers {
         let collection_name = string::utf8(b"collection name");
         let token_name = string::utf8(b"token name");
 
@@ -972,11 +1267,7 @@ module aptos_token_objects::token {
         let collection = get_collection_from_ref(&extend_ref);
         let token_1_ref = create_numbered_token_helper(creator, collection, token_name);
         let token_1_name = name(object::object_from_constructor_ref<Token>(&token_1_ref));
-        debug::print(&token_1_name);
         assert!(token_1_name == std::string::utf8(b"token name1"), 1);
-
-        features::change_feature_flags_for_testing(fx, vector[feature, agg_feature], vector[]);
-        collection::upgrade_to_concurrent(&extend_ref);
 
         let token_2_ref = create_numbered_token_helper(creator, collection, token_name);
         assert!(name(object::object_from_constructor_ref<Token>(&token_2_ref)) == std::string::utf8(b"token name2"), 1);
@@ -989,17 +1280,61 @@ module aptos_token_objects::token {
         assert!(vector::length(&event::emitted_events<collection::Burn>()) == 1, 0);
     }
 
+    #[test(creator = @0x123)]
+    /// This test verifies that once the collection name can be changed, tokens can still be be minted from the collection.
+    fun test_change_collection_name(creator: &signer) {
+        let collection_name = string::utf8(b"collection name");
+        let token_name = string::utf8(b"token name");
+
+        let constructor_ref = &create_fixed_collection(creator, collection_name, 5);
+        let collection = get_collection_from_ref(&object::generate_extend_ref(constructor_ref));
+        let mutator_ref = collection::generate_mutator_ref(constructor_ref);
+
+        create_token_with_collection_helper(creator, collection, token_name);
+        collection::set_name(&mutator_ref, string::utf8(b"new collection name"));
+        create_token_with_collection_helper(creator, collection, token_name);
+
+        assert!(collection::count(collection) == option::some(2), 0);
+    }
+
     #[test_only]
     fun create_collection_helper(creator: &signer, collection_name: String, max_supply: u64): ExtendRef {
-        let constructor_ref = collection::create_fixed_collection(
+        let constructor_ref = create_fixed_collection(creator, collection_name, max_supply);
+        object::generate_extend_ref(&constructor_ref)
+    }
+
+    #[test_only]
+    fun create_collection_as_collection_owner_helper(creator: &signer, collection_name: String, max_supply: u64): ExtendRef {
+        let constructor_ref = create_fixed_collection_as_collection_owner(creator, collection_name, max_supply);
+        object::generate_extend_ref(&constructor_ref)
+    }
+
+    #[test_only]
+    fun create_fixed_collection(creator: &signer, collection_name: String, max_supply: u64): ConstructorRef {
+        collection::create_fixed_collection(
             creator,
             string::utf8(b"collection description"),
             max_supply,
             collection_name,
             option::none(),
             string::utf8(b"collection uri"),
-        );
-        object::generate_extend_ref(&constructor_ref)
+        )
+    }
+
+    #[test_only]
+    fun create_fixed_collection_as_collection_owner(
+        creator: &signer,
+        collection_name: String,
+        max_supply: u64,
+    ): ConstructorRef {
+        collection::create_fixed_collection_as_owner(
+            creator,
+            string::utf8(b"collection description as owner"),
+            max_supply,
+            collection_name,
+            option::none(),
+            string::utf8(b"collection uri as owner"),
+        )
     }
 
     #[test_only]
@@ -1015,7 +1350,44 @@ module aptos_token_objects::token {
     }
 
     #[test_only]
-    fun create_token_object_with_seed_helper(creator: &signer, collection: Object<Collection>, token_name: String, seed: String): ConstructorRef {
+    fun create_token_with_collection_helper(
+        creator: &signer,
+        collection: Object<Collection>,
+        token_name: String
+    ): ConstructorRef {
+        create_named_token_object(
+            creator,
+            collection,
+            string::utf8(b"token description"),
+            token_name,
+            option::some(royalty::create(25, 10000, signer::address_of(creator))),
+            string::utf8(b"uri"),
+        )
+    }
+
+    #[test_only]
+    fun create_named_token_as_collection_owner_helper(
+        creator: &signer,
+        collection: Object<Collection>,
+        token_name: String
+    ): ConstructorRef {
+        create_named_token_as_collection_owner(
+            creator,
+            collection,
+            string::utf8(b"token description"),
+            token_name,
+            option::some(royalty::create(25, 10000, signer::address_of(creator))),
+            string::utf8(b"uri"),
+        )
+    }
+
+    #[test_only]
+    fun create_token_object_with_seed_helper(
+        creator: &signer,
+        collection: Object<Collection>,
+        token_name: String,
+        seed: String
+    ): ConstructorRef {
         create_named_token_from_seed(
             creator,
             collection,
@@ -1028,7 +1400,11 @@ module aptos_token_objects::token {
     }
 
     #[test_only]
-    fun create_numbered_token_helper(creator: &signer, collection: Object<Collection>, token_prefix: String): ConstructorRef {
+    fun create_numbered_token_helper(
+        creator: &signer,
+        collection: Object<Collection>,
+        token_prefix: String
+    ): ConstructorRef {
         create_numbered_token_object(
             creator,
             collection,

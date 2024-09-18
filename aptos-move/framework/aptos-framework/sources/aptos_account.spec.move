@@ -90,9 +90,6 @@ spec aptos_framework::aptos_account {
         pragma verify = false;
         let account_addr_source = signer::address_of(source);
 
-        // The 'from' addr is implictly not equal to 'to' addr
-        requires account_addr_source != to;
-
         include CreateAccountTransferAbortsIf;
         include GuidAbortsIf<AptosCoin>;
         include WithdrawAbortsIf<AptosCoin>{from: source};
@@ -131,10 +128,10 @@ spec aptos_framework::aptos_account {
         let coin_store_source = global<coin::CoinStore<AptosCoin>>(account_addr_source);
         let balance_source = coin_store_source.coin.value;
 
-        requires forall i in 0..len(recipients):
-            recipients[i] != account_addr_source;
-        requires exists i in 0..len(recipients):
-            amounts[i] > 0;
+        // requires forall i in 0..len(recipients):
+        //     recipients[i] != account_addr_source;
+        // requires exists i in 0..len(recipients):
+        //     amounts[i] > 0;
 
         // create account properties
         aborts_if len(recipients) != len(amounts);
@@ -182,11 +179,11 @@ spec aptos_framework::aptos_account {
         let coin_store_source = global<coin::CoinStore<CoinType>>(account_addr_source);
         let balance_source = coin_store_source.coin.value;
 
-        requires forall i in 0..len(recipients):
-            recipients[i] != account_addr_source;
-
-        requires exists i in 0..len(recipients):
-            amounts[i] > 0;
+        // requires forall i in 0..len(recipients):
+        //     recipients[i] != account_addr_source;
+        //
+        // requires exists i in 0..len(recipients):
+        //     amounts[i] > 0;
 
         /// [high-level-req-7]
         aborts_if len(recipients) != len(amounts);
@@ -246,8 +243,6 @@ spec aptos_framework::aptos_account {
         pragma verify = false;
         let account_addr_source = signer::address_of(from);
 
-        //The 'from' addr is implictly not equal to 'to' addr
-        requires account_addr_source != to;
 
         include CreateAccountTransferAbortsIf;
         include WithdrawAbortsIf<CoinType>;
@@ -258,6 +253,30 @@ spec aptos_framework::aptos_account {
         aborts_if exists<coin::CoinStore<CoinType>>(to) && global<coin::CoinStore<CoinType>>(to).frozen;
         ensures exists<aptos_framework::account::Account>(to);
         ensures exists<aptos_framework::coin::CoinStore<CoinType>>(to);
+    }
+
+    spec register_apt(account_signer: &signer) {
+        // TODO: temporary mockup.
+        pragma verify = false;
+    }
+
+    spec fungible_transfer_only(source: &signer, to: address, amount: u64) {
+        // TODO: temporary mockup.
+        pragma verify = false;
+    }
+
+    spec is_fungible_balance_at_least(account: address, amount: u64): bool {
+        // TODO: temporary mockup.
+        pragma verify = false;
+    }
+
+    spec burn_from_fungible_store(
+        ref: &BurnRef,
+        account: address,
+        amount: u64,
+    ) {
+        // TODO: temporary mockup.
+        pragma verify = false;
     }
 
     spec schema CreateAccountTransferAbortsIf {

@@ -3,7 +3,52 @@
 All notable changes to the Aptos CLI will be captured in this file. This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) and the format set out by [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## Unreleased
+
+## [4.2.0] - 2024/09/16
+- Update latest VM and associated changes
+- Update to latest compiler
+
+## [4.1.0] - 2024/08/30
+- Marks Move 2 and compiler v2 as stable.
+- Adds new `--move-2` flag to work with Move 2 without need for multiple other flags. 
+- Adds `aptos move lint` to produce lint warnings for the current package. Only a few lint rules are implemented for now,
+  but more are coming.
+- Adds `aptos move fmt`, which runs the Move formatter, `movefmt`, on the current package. Also adds
+  `aptos update movefmt`. This installs / updates the `movefmt` binary.
+- Adds safe methods to delete a profile, to rename a profile, and to output the private key of a profile.
+
+## [4.0.0] - 2024/08/13
+- **Breaking Change**: change key rotation options such that user has to either pass the name of a new profile or explicitly flag that no profile should be generated, since without this update the interactive profile generator could fail out after the key has already been rotated. This forces the check for new profile validity before doing anything onchain.
+- Add support for key rotation to/from Ledger hardware wallets.
+- Fixes a bug in the Move Prover leading to internal error in generated boogie (error 'global `#0_info` cannot be accessed')
+- **Breaking Change**: A new native function to compute serialized size of a Move value is now supported.
+
+## [3.5.1] - 2024/07/21
+- Upgraded indexer processors for localnet from 5244b84fa5ed872e5280dc8df032d744d62ad29d to fa1ce4947f4c2be57529f1c9732529e05a06cb7f. Upgraded Hasura metadata accordingly.
+- Upgraded Hasura image from 2.36.1 to 2.40.2-ce. Note that we use the Community Edition, so the console won't ask users to upgrade to enterprise anymore / hint at any enterprise features.
+- Fixes a bug in the Move compiler (both v1 and v2) which disallowed `match` as a name for a function or for a variable.
+
+## [3.5.0] - 2024/07/06
+- Add balance command to easily get account balances for APT currently
+- Add network to config file
+- Add explorer links to initialized accounts, and transaction submissions
+- Alias some move commands as common misnomers (e.g. build -> compile, deploy -> publish)
+- Add "hello_blockchain" template to move init command
+
+## [3.4.1] - 2024/05/31
+- Upgraded indexer processors for localnet from ca60e51b53c3be6f9517de7c73d4711e9c1f7236 to 5244b84fa5ed872e5280dc8df032d744d62ad29d. Upgraded Hasura metadata accordingly.
+
+## [3.4.0] - 2024/05/30
+- Adds a check for safe usage of randomness features. Public functions are not allowed to call randomness features unless explicitly allowed via attribute `#[lint::allow_unsafe_randomness]`.
+- The Move syntax now supports structured attribute names, as in `#[attribute_area::attribute_name]`.
+- Upgraded indexer processors for localnet from a11f0b6532349aa6b9a80c9a1d77524f02d8a013 to ca60e51b53c3be6f9517de7c73d4711e9c1f7236. Upgraded Hasura metadata accordingly.
+
+## [3.3.1] - 2024/05/21
+- Fixed incompatibility bug that broken local simulation and gas profiling.
+
+## [3.3.0] - 2024/05/03
 - **Breaking Change** Update View functions to use BCS for submission.  Allows for all arguments to be supported in view functions.  Note some input arguments that were previously inputted as strings may be handled differently.
+- [Early beta release of the Move compiler v2](https://aptos.dev/move/compiler_v2/) is now accessible through the CLI. We now allow specifying the Move compiler version and the Move language version via the CLI.
 
 ## [3.2.0] - 2024/03/29
 - Renamed `run-local-testnet` to `run-localnet`. `run-local-testnet` is still supported for backwards compatibility.

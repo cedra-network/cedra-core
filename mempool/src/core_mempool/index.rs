@@ -7,7 +7,7 @@ use crate::core_mempool::transaction::{MempoolTransaction, SequenceInfo, Timelin
 use crate::{
     counters,
     logging::{LogEntry, LogSchema},
-    shared_mempool::types::MultiBucketTimelineIndexIds,
+    shared_mempool::types::{MultiBucketTimelineIndexIds, TimelineIndexIdentifier},
 };
 use aptos_consensus_types::common::TransactionSummary;
 use aptos_crypto::HashValue;
@@ -17,9 +17,10 @@ use rand::seq::SliceRandom;
 use std::{
     cmp::Ordering,
     collections::{btree_set::Iter, BTreeMap, BTreeSet, HashMap},
+    hash::Hash,
     iter::Rev,
     ops::Bound,
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 pub type AccountTransactions = BTreeMap<u64, MempoolTransaction>;
@@ -59,6 +60,7 @@ impl PriorityIndex {
         OrderedQueueKey {
             gas_ranking_score: txn.ranking_score,
             expiration_time: txn.expiration_time,
+            insertion_time: txn.insertion_info.insertion_time,
             address: txn.get_sender(),
             sequence_number: txn.sequence_info,
             hash: txn.get_committed_hash(),
@@ -78,6 +80,7 @@ impl PriorityIndex {
 pub struct OrderedQueueKey {
     pub gas_ranking_score: u64,
     pub expiration_time: Duration,
+    pub insertion_time: SystemTime,
     pub address: AccountAddress,
     pub sequence_number: SequenceInfo,
     pub hash: HashValue,
@@ -95,7 +98,7 @@ impl Ord for OrderedQueueKey {
             Ordering::Equal => {},
             ordering => return ordering,
         }
-        match self.expiration_time.cmp(&other.expiration_time).reverse() {
+        match self.insertion_time.cmp(&other.insertion_time).reverse() {
             Ordering::Equal => {},
             ordering => return ordering,
         }
@@ -208,7 +211,7 @@ impl Ord for TTLOrderingKey {
 /// logical reference to transaction content in main storage.
 pub struct TimelineIndex {
     timeline_id: u64,
-    timeline: BTreeMap<u64, (AccountAddress, u64)>,
+    timeline: BTreeMap<u64, (AccountAddress, u64, Instant)>,
 }
 
 impl TimelineIndex {
@@ -221,20 +224,27 @@ impl TimelineIndex {
 
     /// Read all transactions from the timeline since <timeline_id>.
     /// At most `count` transactions will be returned.
+    /// If `before` is set, only transactions inserted before this time will be returned.
     pub(crate) fn read_timeline(
         &self,
         timeline_id: u64,
         count: usize,
+        before: Option<Instant>,
     ) -> Vec<(AccountAddress, u64)> {
         let mut batch = vec![];
-        for (_id, &(address, sequence_number)) in self
+        for (_id, &(address, sequence_number, insertion_time)) in self
             .timeline
             .range((Bound::Excluded(timeline_id), Bound::Unbounded))
         {
-            batch.push((address, sequence_number));
+            if let Some(before) = before {
+                if insertion_time >= before {
+                    break;
+                }
+            }
             if batch.len() == count {
                 break;
             }
+            batch.push((address, sequence_number));
         }
         batch
     }
@@ -243,8 +253,7 @@ impl TimelineIndex {
     pub(crate) fn timeline_range(&self, start_id: u64, end_id: u64) -> Vec<(AccountAddress, u64)> {
         self.timeline
             .range((Bound::Excluded(start_id), Bound::Included(end_id)))
-            .map(|(_idx, txn)| txn)
-            .cloned()
+            .map(|(_idx, &(address, sequence, _))| (address, sequence))
             .collect()
     }
 
@@ -254,6 +263,7 @@ impl TimelineIndex {
             (
                 txn.get_sender(),
                 txn.sequence_info.transaction_sequence_number,
+                Instant::now(),
             ),
         );
         txn.timeline_state = TimelineState::Ready(self.timeline_id);
@@ -310,6 +320,7 @@ impl MultiBucketTimelineIndex {
         &self,
         timeline_id: &MultiBucketTimelineIndexIds,
         count: usize,
+        before: Option<Instant>,
     ) -> Vec<Vec<(AccountAddress, u64)>> {
         assert!(timeline_id.id_per_bucket.len() == self.bucket_mins.len());
 
@@ -321,7 +332,7 @@ impl MultiBucketTimelineIndex {
             .zip(timeline_id.id_per_bucket.iter())
             .rev()
         {
-            let txns = timeline.read_timeline(timeline_id, count - added);
+            let txns = timeline.read_timeline(timeline_id, count - added, before);
             added += txns.len();
             returned.push(txns);
 
@@ -338,13 +349,18 @@ impl MultiBucketTimelineIndex {
     /// Read transactions from the timeline from `start_id` (exclusive) to `end_id` (inclusive).
     pub(crate) fn timeline_range(
         &self,
-        start_end_pairs: &Vec<(u64, u64)>,
+        start_end_pairs: HashMap<TimelineIndexIdentifier, (u64, u64)>,
     ) -> Vec<(AccountAddress, u64)> {
         assert_eq!(start_end_pairs.len(), self.timelines.len());
 
         let mut all_txns = vec![];
-        for (timeline, &(start_id, end_id)) in self.timelines.iter().zip(start_end_pairs.iter()) {
-            let mut txns = timeline.timeline_range(start_id, end_id);
+        for (timeline_index_identifier, (start_id, end_id)) in start_end_pairs {
+            let mut txns = self
+                .timelines
+                .get(timeline_index_identifier as usize)
+                .map_or_else(Vec::new, |timeline| {
+                    timeline.timeline_range(start_id, end_id)
+                });
             all_txns.append(&mut txns);
         }
         all_txns

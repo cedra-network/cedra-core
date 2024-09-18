@@ -38,6 +38,7 @@ use aptos_types::{
     contract_event::EventWithVersion,
     state_store::state_key::StateKey,
     transaction::SignedTransaction,
+    CoinType,
 };
 use move_core_types::language_storage::StructTag;
 use reqwest::{
@@ -220,16 +221,12 @@ impl Client {
         })
     }
 
-    pub async fn get_account_balance_bcs(
+    pub async fn get_account_balance_bcs<C: CoinType>(
         &self,
         address: AccountAddress,
-        coin_type: &str,
     ) -> AptosResult<Response<u64>> {
         let resp = self
-            .get_account_resource_bcs::<CoinStoreResource>(
-                address,
-                &format!("0x1::coin::CoinStore<{}>", coin_type),
-            )
+            .get_account_resource_bcs::<CoinStoreResource<C>>(address, &C::type_tag().to_string())
             .await?;
         resp.and_then(|resource| Ok(resource.coin()))
     }
@@ -1605,7 +1602,7 @@ impl Client {
         base: &str,
         limit_per_request: u64,
         ledger_version: Option<u64>,
-        cursor: Option<String>,
+        cursor: &Option<String>,
     ) -> AptosResult<Url> {
         let mut path = format!("{}?limit={}", base, limit_per_request);
         if let Some(ledger_version) = ledger_version {
@@ -1637,11 +1634,11 @@ impl Client {
                 base_path,
                 limit_per_request,
                 ledger_version,
-                cursor,
+                &cursor,
             )?;
             let raw_response = self.inner.get(url).send().await?;
             let response: Response<Vec<T>> = self.json(raw_response).await?;
-            cursor = response.state().cursor.clone();
+            cursor.clone_from(&response.state().cursor);
             if cursor.is_none() {
                 break Ok(response.map(|mut v| {
                     result.append(&mut v);
@@ -1670,13 +1667,13 @@ impl Client {
                 base_path,
                 limit_per_request,
                 ledger_version,
-                cursor,
+                &cursor,
             )?;
             let response: Response<BTreeMap<T, Vec<u8>>> = self
                 .get_bcs(url)
                 .await?
                 .and_then(|inner| bcs::from_bytes(&inner))?;
-            cursor = response.state().cursor.clone();
+            cursor.clone_from(&response.state().cursor);
             if cursor.is_none() {
                 break Ok(response.map(|mut v| {
                     result.append(&mut v);

@@ -4,6 +4,7 @@
 
 use crate::{
     core_mempool::{CoreMempool, TimelineState},
+    network::BroadcastPeerPriority,
     shared_mempool::start_shared_mempool,
     MempoolClientSender, QuorumStoreRequest,
 };
@@ -125,7 +126,7 @@ impl MockSharedMempool {
             PeerManagerRequestSender::new(network_reqs_tx),
             ConnectionRequestSender::new(connection_reqs_tx),
         );
-        let network_events = NetworkEvents::new(network_notifs_rx, None);
+        let network_events = NetworkEvents::new(network_notifs_rx, None, true);
         let (ac_client, client_events) = mpsc::channel(1_024);
         let (quorum_store_sender, quorum_store_receiver) = mpsc::channel(1_024);
         let (mempool_notifier, mempool_listener) =
@@ -184,6 +185,8 @@ impl MockSharedMempool {
                         0,
                         TimelineState::NotReady,
                         false,
+                        None,
+                        Some(BroadcastPeerPriority::Primary),
                     )
                     .code
                     != MempoolStatusCode::Accepted

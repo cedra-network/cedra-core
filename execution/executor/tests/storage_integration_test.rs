@@ -25,6 +25,7 @@ use aptos_types::{
     validator_config::ValidatorConfig,
     validator_signer::ValidatorSigner,
 };
+use std::sync::Arc;
 
 #[test]
 fn test_genesis() {
@@ -46,7 +47,7 @@ fn test_genesis() {
         .reader
         .get_state_value_with_proof_by_version(&account_resource_path, 0)
         .unwrap();
-    let latest_version = db.reader.get_latest_version().unwrap();
+    let latest_version = db.reader.get_latest_ledger_info_version().unwrap();
     assert_eq!(latest_version, 0);
     let txn_info = db
         .reader
@@ -79,7 +80,7 @@ fn test_reconfiguration() {
     let parent_block_id = executor.committed_block_id();
     let signer = ValidatorSigner::new(
         validators[0].data.owner_address,
-        validators[0].consensus_key.clone(),
+        Arc::new(validators[0].consensus_key.clone()),
     );
     let validator_account = signer.author();
 
