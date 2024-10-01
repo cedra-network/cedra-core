@@ -6,10 +6,12 @@
 #![deny(missing_docs)]
 
 //! A library supplying various cryptographic primitives
+pub mod asymmetric_encryption;
 pub mod bls12381;
 pub mod bulletproofs;
 pub mod compat;
 pub mod ed25519;
+pub mod elgamal;
 pub mod encoding_type;
 pub mod error;
 pub mod hash;
@@ -23,6 +25,7 @@ pub mod traits;
 pub mod validatable;
 pub mod x25519;
 
+pub mod poseidon_bn254;
 #[cfg(test)]
 mod unit_tests;
 

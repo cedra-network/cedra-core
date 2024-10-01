@@ -3,6 +3,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
+    chaos_schema::{
+        Chaos, ChaosConditionType, ChaosStatus, ConditionStatus, NetworkChaos, StressChaos,
+    },
     check_for_container_restart, create_k8s_client, delete_all_chaos, get_default_pfn_node_config,
     get_free_port, get_stateful_set_image, install_public_fullnode,
     node::K8sNode,
@@ -37,14 +40,18 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     convert::TryFrom,
     env, str,
-    sync::Arc,
+    sync::{atomic::AtomicU32, Arc},
 };
-use tokio::{runtime::Runtime, time::Duration};
+use tokio::{
+    runtime::{Handle, Runtime},
+    task::block_in_place,
+    time::Duration,
+};
 
 pub struct K8sSwarm {
     validators: HashMap<PeerId, K8sNode>,
     fullnodes: HashMap<PeerId, K8sNode>,
-    root_account: LocalAccount,
+    root_account: Arc<LocalAccount>,
     kube_client: K8sClient,
     versions: Arc<HashMap<Version, String>>,
     pub chain_id: ChainId,
@@ -54,6 +61,7 @@ pub struct K8sSwarm {
     prom_client: Option<PrometheusClient>,
     era: Option<String>,
     use_port_forward: bool,
+    chaos_experiment_ops: Box<dyn ChaosExperimentOps + Send + Sync>,
 }
 
 impl K8sSwarm {
@@ -82,6 +90,7 @@ impl K8sSwarm {
             )
         })?;
         let root_account = LocalAccount::new(address, account_key, sequence_number);
+        let root_account = Arc::new(root_account);
 
         let mut versions = HashMap::new();
         let cur_version = Version::new(0, image_tag.to_string());
@@ -101,7 +110,7 @@ impl K8sSwarm {
             validators,
             fullnodes,
             root_account,
-            kube_client,
+            kube_client: kube_client.clone(),
             chain_id: ChainId::new(4),
             versions: Arc::new(versions),
             kube_namespace: kube_namespace.to_string(),
@@ -110,6 +119,10 @@ impl K8sSwarm {
             prom_client,
             era,
             use_port_forward,
+            chaos_experiment_ops: Box::new(RealChaosExperimentOps {
+                kube_client: kube_client.clone(),
+                kube_namespace: kube_namespace.to_string(),
+            }),
         };
 
         // test hitting the configured prometheus endpoint
@@ -170,7 +183,7 @@ impl K8sSwarm {
             self.get_kube_client(),
             Some(self.kube_namespace.clone()),
         ));
-        let (peer_id, mut k8snode) = install_public_fullnode(
+        let (peer_id, k8snode) = install_public_fullnode(
             stateful_set_api,
             configmap_api,
             persistent_volume_claim_api,
@@ -193,7 +206,7 @@ impl K8sSwarm {
 
 #[async_trait::async_trait]
 impl Swarm for K8sSwarm {
-    async fn health_check(&mut self) -> Result<()> {
+    async fn health_check(&self) -> Result<()> {
         let nodes = self.validators.values().collect();
         let unhealthy_nodes = nodes_healthcheck(nodes).await.unwrap();
         if !unhealthy_nodes.is_empty() {
@@ -213,24 +226,8 @@ impl Swarm for K8sSwarm {
         Box::new(validators.into_iter())
     }
 
-    fn validators_mut<'a>(&'a mut self) -> Box<dyn Iterator<Item = &'a mut dyn Validator> + 'a> {
-        let mut validators: Vec<_> = self
-            .validators
-            .values_mut()
-            .map(|v| v as &'a mut dyn Validator)
-            .collect();
-        validators.sort_by_key(|v| v.index());
-        Box::new(validators.into_iter())
-    }
-
     fn validator(&self, id: PeerId) -> Option<&dyn Validator> {
         self.validators.get(&id).map(|v| v as &dyn Validator)
-    }
-
-    fn validator_mut(&mut self, id: PeerId) -> Option<&mut dyn Validator> {
-        self.validators
-            .get_mut(&id)
-            .map(|v| v as &mut dyn Validator)
     }
 
     /// TODO: this should really be a method on Node rather than Swarm
@@ -273,22 +270,8 @@ impl Swarm for K8sSwarm {
         Box::new(full_nodes.into_iter())
     }
 
-    fn full_nodes_mut<'a>(&'a mut self) -> Box<dyn Iterator<Item = &'a mut dyn FullNode> + 'a> {
-        let mut full_nodes: Vec<_> = self
-            .fullnodes
-            .values_mut()
-            .map(|n| n as &'a mut dyn FullNode)
-            .collect();
-        full_nodes.sort_by_key(|n| n.index());
-        Box::new(full_nodes.into_iter())
-    }
-
     fn full_node(&self, id: PeerId) -> Option<&dyn FullNode> {
         self.fullnodes.get(&id).map(|v| v as &dyn FullNode)
-    }
-
-    fn full_node_mut(&mut self, id: PeerId) -> Option<&mut dyn FullNode> {
-        self.fullnodes.get_mut(&id).map(|v| v as &mut dyn FullNode)
     }
 
     fn add_validator(&mut self, _version: &Version, _template: NodeConfig) -> Result<PeerId> {
@@ -329,11 +312,11 @@ impl Swarm for K8sSwarm {
         Box::new(self.versions.keys().cloned())
     }
 
-    fn chain_info(&mut self) -> ChainInfo<'_> {
+    fn chain_info(&self) -> ChainInfo {
         let rest_api_url = self.get_rest_api_url(0);
         let inspection_service_url = self.get_inspection_service_url(0);
         ChainInfo::new(
-            &mut self.root_account,
+            self.root_account.clone(),
             rest_api_url,
             inspection_service_url,
             self.chain_id,
@@ -346,13 +329,21 @@ impl Swarm for K8sSwarm {
         "See fgi output for more information.".to_string()
     }
 
-    fn inject_chaos(&mut self, chaos: SwarmChaos) -> Result<()> {
+    async fn inject_chaos(&mut self, chaos: SwarmChaos) -> Result<()> {
         self.inject_swarm_chaos(&chaos)?;
         self.chaoses.insert(chaos);
+        self.chaos_experiment_ops
+            .ensure_chaos_experiments_active()
+            .await?;
+
         Ok(())
     }
 
-    fn remove_chaos(&mut self, chaos: SwarmChaos) -> Result<()> {
+    async fn remove_chaos(&mut self, chaos: SwarmChaos) -> Result<()> {
+        self.chaos_experiment_ops
+            .ensure_chaos_experiments_active()
+            .await?;
+
         if self.chaoses.remove(&chaos) {
             self.remove_swarm_chaos(&chaos)?;
         } else {
@@ -361,7 +352,11 @@ impl Swarm for K8sSwarm {
         Ok(())
     }
 
-    fn remove_all_chaos(&mut self) -> Result<()> {
+    async fn remove_all_chaos(&mut self) -> Result<()> {
+        self.chaos_experiment_ops
+            .ensure_chaos_experiments_active()
+            .await?;
+
         // try removing all existing chaoses
         for chaos in self.chaoses.clone() {
             self.remove_swarm_chaos(&chaos)?;
@@ -437,11 +432,11 @@ impl Swarm for K8sSwarm {
         bail!("No prom client");
     }
 
-    fn chain_info_for_node(&mut self, idx: usize) -> ChainInfo<'_> {
+    fn chain_info_for_node(&mut self, idx: usize) -> ChainInfo {
         let rest_api_url = self.get_rest_api_url(idx);
         let inspection_service_url = self.get_inspection_service_url(idx);
         ChainInfo::new(
-            &mut self.root_account,
+            self.root_account.clone(),
             rest_api_url,
             inspection_service_url,
             self.chain_id,
@@ -465,6 +460,11 @@ pub fn k8s_wait_nodes_strategy() -> impl Iterator<Item = Duration> {
     fixed_retry_strategy(10 * 1000, 120)
 }
 
+pub fn k8s_wait_indexer_strategy() -> impl Iterator<Item = Duration> {
+    // retry every 10 seconds for 20 minutes
+    fixed_retry_strategy(10 * 1000, 120)
+}
+
 async fn list_stateful_sets(client: K8sClient, kube_namespace: &str) -> Result<Vec<StatefulSet>> {
     let stateful_set_api: Api<StatefulSet> = Api::namespaced(client, kube_namespace);
     let lp = ListParams::default();
@@ -472,12 +472,30 @@ async fn list_stateful_sets(client: K8sClient, kube_namespace: &str) -> Result<V
     Ok(stateful_sets)
 }
 
-fn stateful_set_name_matches(sts: &StatefulSet, suffix: &str) -> bool {
-    if let Some(s) = sts.metadata.name.as_ref() {
-        s.contains(suffix)
-    } else {
-        false
+/// Check if the stateful set labels match the given labels
+fn stateful_set_labels_matches(sts: &StatefulSet, labels: &BTreeMap<String, String>) -> bool {
+    if sts.metadata.labels.is_none() {
+        return false;
     }
+    let sts_labels = sts
+        .metadata
+        .labels
+        .as_ref()
+        .expect("Failed to get StatefulSet labels");
+    labels.iter().all(|(k, v)| {
+        let truncated_k = k.chars().take(63).collect::<String>();
+        let truncated_v = v.chars().take(63).collect::<String>();
+        // warn if the label is truncated
+        if truncated_k != *k || truncated_v != *v {
+            warn!(
+                "Label truncated during search: {} -> {}, {} -> {}",
+                k, truncated_k, v, truncated_v
+            );
+        }
+        sts_labels
+            .get(&truncated_k)
+            .map_or(false, |val| val == &truncated_v)
+    })
 }
 
 fn parse_service_name_from_stateful_set_name(
@@ -550,7 +568,7 @@ fn get_k8s_node_from_stateful_set(
         peer_id: PeerId::random(),
         index,
         service_name,
-        rest_api_port,
+        rest_api_port: AtomicU32::new(rest_api_port),
         version: Version::new(0, image_tag),
         namespace: namespace.to_string(),
         haproxy_enabled: enable_haproxy,
@@ -567,7 +585,21 @@ pub(crate) async fn get_validators(
     let stateful_sets = list_stateful_sets(client, kube_namespace).await?;
     let validators = stateful_sets
         .into_iter()
-        .filter(|sts| stateful_set_name_matches(sts, "validator"))
+        .filter(|sts| {
+            stateful_set_labels_matches(
+                sts,
+                &BTreeMap::from([
+                    (
+                        "app.kubernetes.io/name".to_string(),
+                        "validator".to_string(),
+                    ),
+                    (
+                        "app.kubernetes.io/part-of".to_string(),
+                        "aptos-node".to_string(),
+                    ),
+                ]),
+            )
+        })
         .map(|sts| {
             let node = get_k8s_node_from_stateful_set(&sts, enable_haproxy, use_port_forward);
             (node.peer_id(), node)
@@ -577,7 +609,7 @@ pub(crate) async fn get_validators(
     Ok(validators)
 }
 
-pub(crate) async fn get_fullnodes(
+pub(crate) async fn get_validator_fullnodes(
     client: K8sClient,
     kube_namespace: &str,
     use_port_forward: bool,
@@ -586,7 +618,18 @@ pub(crate) async fn get_fullnodes(
     let stateful_sets = list_stateful_sets(client, kube_namespace).await?;
     let fullnodes = stateful_sets
         .into_iter()
-        .filter(|sts| stateful_set_name_matches(sts, "fullnode"))
+        .filter(|sts| {
+            stateful_set_labels_matches(
+                sts,
+                &BTreeMap::from([
+                    ("app.kubernetes.io/name".to_string(), "fullnode".to_string()),
+                    (
+                        "app.kubernetes.io/part-of".to_string(),
+                        "aptos-node".to_string(),
+                    ),
+                ]),
+            )
+        })
         .map(|sts| {
             let node = get_k8s_node_from_stateful_set(&sts, enable_haproxy, use_port_forward);
             (node.peer_id(), node)
@@ -669,20 +712,134 @@ pub async fn nodes_healthcheck(nodes: Vec<&K8sNode>) -> Result<Vec<String>> {
 
 impl Drop for K8sSwarm {
     fn drop(&mut self) {
-        let runtime = Runtime::new().unwrap();
         if !self.keep {
-            runtime
-                .block_on(uninstall_testnet_resources(self.kube_namespace.clone()))
-                .unwrap();
+            let fut = uninstall_testnet_resources(self.kube_namespace.clone());
+            match Handle::try_current() {
+                Ok(handle) => block_in_place(move || handle.block_on(fut).unwrap()),
+                Err(_err) => {
+                    let runtime = Runtime::new().unwrap();
+                    runtime.block_on(fut).unwrap();
+                },
+            }
         } else {
             println!("Keeping kube_namespace {}", self.kube_namespace);
         }
     }
 }
 
+#[async_trait::async_trait]
+trait ChaosExperimentOps {
+    async fn list_network_chaos(&self) -> Result<Vec<NetworkChaos>>;
+    async fn list_stress_chaos(&self) -> Result<Vec<StressChaos>>;
+
+    async fn ensure_chaos_experiments_active(&self) -> Result<()> {
+        let timeout_duration = Duration::from_secs(300); // 5 minutes
+        let polling_interval = Duration::from_secs(5);
+
+        tokio::time::timeout(timeout_duration, async {
+            loop {
+                match self.are_chaos_experiments_active().await {
+                    Ok(true) => {
+                        info!("Chaos experiments are active");
+                        return Ok(());
+                    },
+                    Ok(false) => {
+                        info!("Chaos experiments are not active, retrying...");
+                    },
+                    Err(e) => {
+                        warn!(
+                            "Error while checking chaos experiments status: {}. Retrying...",
+                            e
+                        );
+                    },
+                }
+                tokio::time::sleep(polling_interval).await;
+            }
+        })
+        .await
+        .map_err(|e| {
+            anyhow!(
+                "Timed out waiting for chaos experiments to be active: {}",
+                e
+            )
+        })?
+    }
+
+    /// Checks if all chaos experiments are active
+    async fn are_chaos_experiments_active(&self) -> Result<bool> {
+        let (network_chaoses, stress_chaoses) =
+            tokio::join!(self.list_network_chaos(), self.list_stress_chaos());
+
+        let chaoses: Vec<Chaos> = network_chaoses?
+            .into_iter()
+            .map(Chaos::Network)
+            .chain(stress_chaoses?.into_iter().map(Chaos::Stress))
+            .collect();
+
+        Ok(!chaoses.is_empty()
+            && chaoses.iter().all(|chaos| match chaos {
+                Chaos::Network(network_chaos) => check_all_injected(&network_chaos.status),
+                Chaos::Stress(stress_chaos) => check_all_injected(&stress_chaos.status),
+            }))
+    }
+}
+
+fn check_all_injected(status: &Option<ChaosStatus>) -> bool {
+    status
+        .as_ref()
+        .and_then(|status| status.conditions.as_ref())
+        .map_or(false, |conditions| {
+            conditions.iter().any(|c| {
+                c.r#type == ChaosConditionType::AllInjected && c.status == ConditionStatus::True
+            })
+        })
+}
+
+struct MockChaosExperimentOps {
+    network_chaos: Vec<NetworkChaos>,
+    stress_chaos: Vec<StressChaos>,
+}
+
+#[async_trait::async_trait]
+impl ChaosExperimentOps for MockChaosExperimentOps {
+    async fn list_network_chaos(&self) -> Result<Vec<NetworkChaos>> {
+        Ok(self.network_chaos.clone())
+    }
+
+    async fn list_stress_chaos(&self) -> Result<Vec<StressChaos>> {
+        Ok(self.stress_chaos.clone())
+    }
+}
+
+struct RealChaosExperimentOps {
+    kube_client: K8sClient,
+    kube_namespace: String,
+}
+
+#[async_trait::async_trait]
+impl ChaosExperimentOps for RealChaosExperimentOps {
+    async fn list_network_chaos(&self) -> Result<Vec<NetworkChaos>> {
+        let network_chaos_api: Api<NetworkChaos> =
+            Api::namespaced(self.kube_client.clone(), &self.kube_namespace);
+        let lp = ListParams::default();
+        let network_chaoses = network_chaos_api.list(&lp).await?.items;
+        Ok(network_chaoses)
+    }
+
+    async fn list_stress_chaos(&self) -> Result<Vec<StressChaos>> {
+        let stress_chaos_api: Api<StressChaos> =
+            Api::namespaced(self.kube_client.clone(), &self.kube_namespace);
+        let lp = ListParams::default();
+        let stress_chaoses = stress_chaos_api.list(&lp).await?.items;
+        Ok(stress_chaoses)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chaos_schema::ChaosCondition;
+    use kube::api::ObjectMeta;
 
     #[test]
     fn test_parse_service_name_from_stateful_set_name() {
@@ -703,5 +860,151 @@ mod tests {
         let fullnode_service_name =
             parse_service_name_from_stateful_set_name(fullnode_sts_name, true);
         assert_eq!("aptos-node-0-fullnode-lb", &fullnode_service_name);
+    }
+
+    async fn create_chaos_experiments(
+        network_status: ConditionStatus,
+        stress_status: ConditionStatus,
+    ) -> (Vec<NetworkChaos>, Vec<StressChaos>) {
+        let network_chaos = NetworkChaos {
+            status: Some(ChaosStatus {
+                conditions: Some(vec![ChaosCondition {
+                    r#type: ChaosConditionType::AllInjected,
+                    status: network_status,
+                }]),
+            }),
+            ..NetworkChaos::new("test", Default::default())
+        };
+        let stress_chaos = StressChaos {
+            status: Some(ChaosStatus {
+                conditions: Some(vec![ChaosCondition {
+                    r#type: ChaosConditionType::AllInjected,
+                    status: stress_status,
+                }]),
+            }),
+            ..StressChaos::new("test", Default::default())
+        };
+        (vec![network_chaos], vec![stress_chaos])
+    }
+
+    #[tokio::test]
+    async fn test_chaos_experiments_active() {
+        // No experiments active
+        let chaos_ops = MockChaosExperimentOps {
+            network_chaos: vec![],
+            stress_chaos: vec![],
+        };
+        assert!(!chaos_ops.are_chaos_experiments_active().await.unwrap());
+
+        // Only network chaos active
+        let (network_chaos, stress_chaos) =
+            create_chaos_experiments(ConditionStatus::True, ConditionStatus::False).await;
+        let chaos_ops = MockChaosExperimentOps {
+            network_chaos,
+            stress_chaos,
+        };
+        assert!(!chaos_ops.are_chaos_experiments_active().await.unwrap());
+
+        // Both network and stress chaos active
+        let (network_chaos, stress_chaos) =
+            create_chaos_experiments(ConditionStatus::True, ConditionStatus::True).await;
+        let chaos_ops = MockChaosExperimentOps {
+            network_chaos,
+            stress_chaos,
+        };
+        assert!(chaos_ops.are_chaos_experiments_active().await.unwrap());
+    }
+
+    #[test]
+    fn test_stateful_set_labels_matches() {
+        // Create a StatefulSet with some labels
+        let mut labels = BTreeMap::new();
+        labels.insert("app".to_string(), "validator".to_string());
+        labels.insert("component".to_string(), "blockchain".to_string());
+
+        let sts = StatefulSet {
+            metadata: ObjectMeta {
+                labels: Some(labels),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        // All labels match
+        let mut match_labels = BTreeMap::new();
+        match_labels.insert("app".to_string(), "validator".to_string());
+        match_labels.insert("component".to_string(), "blockchain".to_string());
+        assert!(stateful_set_labels_matches(&sts, &match_labels));
+
+        // Subset of labels match
+        let mut match_labels = BTreeMap::new();
+        match_labels.insert("app".to_string(), "validator".to_string());
+        assert!(stateful_set_labels_matches(&sts, &match_labels));
+
+        // One label doesn't match
+        let mut match_labels = BTreeMap::new();
+        match_labels.insert("app".to_string(), "validator".to_string());
+        match_labels.insert("component".to_string(), "database".to_string());
+        assert!(!stateful_set_labels_matches(&sts, &match_labels));
+
+        // Extra label in match_labels
+        let mut match_labels = BTreeMap::new();
+        match_labels.insert("app".to_string(), "validator".to_string());
+        match_labels.insert("component".to_string(), "blockchain".to_string());
+        match_labels.insert("extra".to_string(), "label".to_string());
+        assert!(!stateful_set_labels_matches(&sts, &match_labels));
+
+        // Empty match_labels
+        let match_labels = BTreeMap::new();
+        assert!(stateful_set_labels_matches(&sts, &match_labels));
+
+        // StatefulSet with no labels
+        let sts_no_labels = StatefulSet {
+            metadata: ObjectMeta {
+                labels: None,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut match_labels = BTreeMap::new();
+        match_labels.insert("app".to_string(), "validator".to_string());
+        assert!(!stateful_set_labels_matches(&sts_no_labels, &match_labels));
+
+        // StatefulSet with truncated labels
+        let mut labels = BTreeMap::new();
+        labels.insert("app".to_string(), "validator".to_string());
+        // component label is truncated to 63 characters
+        labels.insert(
+            "component".to_string(),
+            "blockchain"
+                .to_string()
+                .repeat(10)
+                .chars()
+                .take(63)
+                .collect::<String>(),
+        );
+
+        let sts_truncated_labels = StatefulSet {
+            metadata: ObjectMeta {
+                labels: Some(labels),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut match_labels = BTreeMap::new();
+        // we try to match with the full label, which we dont know if it's truncated or not
+        match_labels.insert(
+            "component".to_string(),
+            "blockchain"
+                .to_string()
+                .repeat(10)
+                .chars()
+                .collect::<String>(),
+        );
+        // it should match because the labels are the same when truncated
+        assert!(stateful_set_labels_matches(
+            &sts_truncated_labels,
+            &match_labels
+        ));
     }
 }

@@ -72,12 +72,15 @@ fn test_create_single_node_test_config() {
             output_batch_size: 100
         api:
             address: 0.0.0.0:8081
+        execution:
+            genesis_waypoint:
+                from_config: "0:6072b68a942aace147e0655c5704beaa255c84a7829baa4e72a500f1516584c4"
         "#,
     )
     .unwrap();
     let f = std::fs::OpenOptions::new()
         .write(true)
-        .create(true)
+        .create_new(true)
         .open(&config_override_path)
         .expect("Couldn't open file");
     serde_yaml::to_writer(f, &config_override).unwrap();
@@ -90,12 +93,13 @@ fn test_create_single_node_test_config() {
         &test_dir,
         false,
         false,
+        false,
         aptos_cached_packages::head_release_bundle(),
         rand::rngs::StdRng::from_entropy(),
     )
     .unwrap();
 
-    // overriden configs
+    // overridden configs
     assert!(merged_config.storage.enable_indexer);
     assert!(merged_config.indexer_grpc.enabled);
     // default config is unchanged

@@ -12,6 +12,8 @@ use aptos_types::{
 };
 use aptos_vm_types::resolver::ResourceGroupSize;
 use bytes::Bytes;
+use derivative::Derivative;
+use move_binary_format::errors::PartialVMError;
 use move_core_types::value::MoveTypeLayout;
 use std::sync::{atomic::AtomicU32, Arc};
 
@@ -34,7 +36,8 @@ pub(crate) enum Flag {
     Estimate,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Derivative)]
+#[derivative(PartialEq, Eq)]
 pub enum MVGroupError {
     /// The base group contents are not initialized.
     Uninitialized,
@@ -43,7 +46,7 @@ pub enum MVGroupError {
     /// A dependency on other transaction has been found during the read.
     Dependency(TxnIndex),
     /// Tag serialization is needed for group size computation.
-    TagSerializationError,
+    TagSerializationError(#[derivative(PartialEq = "ignore")] PartialVMError),
 }
 
 /// Returned as Err(..) when failed to read from the multi-version data-structure.
@@ -243,13 +246,13 @@ pub(crate) mod test {
     use super::*;
     use aptos_aggregator::delta_change_set::serialize;
     use aptos_types::{
-        access_path::AccessPath,
         executable::ModulePath,
         state_store::state_value::StateValue,
         write_set::{TransactionWrite, WriteOpKind},
     };
     use bytes::Bytes;
     use claims::{assert_err, assert_ok_eq};
+    use move_core_types::{account_address::AccountAddress, identifier::IdentStr};
     use std::{fmt::Debug, hash::Hash, sync::Arc};
 
     #[derive(Clone, Eq, Hash, PartialEq, Debug)]
@@ -259,8 +262,15 @@ pub(crate) mod test {
     );
 
     impl<K: Hash + Clone + Eq + Debug> ModulePath for KeyType<K> {
-        fn module_path(&self) -> Option<AccessPath> {
-            None
+        fn is_module_path(&self) -> bool {
+            false
+        }
+
+        fn from_address_and_module_name(
+            _address: &AccountAddress,
+            _module_name: &IdentStr,
+        ) -> Self {
+            unreachable!("Irrelevant for test")
         }
     }
 
@@ -361,17 +371,10 @@ pub(crate) mod test {
         fn set_bytes(&mut self, bytes: Bytes) {
             self.bytes = bytes;
         }
-
-        fn convert_read_to_modification(&self) -> Option<Self>
-        where
-            Self: Sized,
-        {
-            Some(self.clone())
-        }
     }
 
     // Generate a Vec deterministically based on txn_idx and incarnation.
-    pub(crate) fn value_for(txn_idx: TxnIndex, incarnation: Incarnation) -> TestValue {
+    fn value_for(txn_idx: TxnIndex, incarnation: Incarnation) -> TestValue {
         TestValue::new(vec![txn_idx * 5, txn_idx + incarnation, incarnation * 5])
     }
 

@@ -286,6 +286,7 @@ and accounts have been initialized during genesis.
 
 Can only be called during genesis for tests to grant mint capability to aptos framework and core resources
 accounts.
+Expects account and APT store to be registered before calling.
 
 
 <pre><code><b>public</b>(<b>friend</b>) <b>fun</b> <a href="aptos_coin.md#0x1_aptos_coin_configure_accounts_for_test">configure_accounts_for_test</a>(aptos_framework: &<a href="../../aptos-stdlib/../move-stdlib/doc/signer.md#0x1_signer">signer</a>, core_resources: &<a href="../../aptos-stdlib/../move-stdlib/doc/signer.md#0x1_signer">signer</a>, mint_cap: <a href="coin.md#0x1_coin_MintCapability">coin::MintCapability</a>&lt;<a href="aptos_coin.md#0x1_aptos_coin_AptosCoin">aptos_coin::AptosCoin</a>&gt;)
@@ -305,7 +306,6 @@ accounts.
     <a href="system_addresses.md#0x1_system_addresses_assert_aptos_framework">system_addresses::assert_aptos_framework</a>(aptos_framework);
 
     // Mint the core resource <a href="account.md#0x1_account">account</a> <a href="aptos_coin.md#0x1_aptos_coin_AptosCoin">AptosCoin</a> for gas so it can execute system transactions.
-    <a href="coin.md#0x1_coin_register">coin::register</a>&lt;<a href="aptos_coin.md#0x1_aptos_coin_AptosCoin">AptosCoin</a>&gt;(core_resources);
     <b>let</b> coins = <a href="coin.md#0x1_coin_mint">coin::mint</a>&lt;<a href="aptos_coin.md#0x1_aptos_coin_AptosCoin">AptosCoin</a>&gt;(
         18446744073709551615,
         &mint_cap,
@@ -536,9 +536,9 @@ Claim the delegated mint capability and destroy the delegated token.
 <b>aborts_if</b> <b>exists</b>&lt;<a href="aptos_coin.md#0x1_aptos_coin_MintCapStore">MintCapStore</a>&gt;(addr);
 <b>aborts_if</b> <b>exists</b>&lt;<a href="coin.md#0x1_coin_CoinInfo">coin::CoinInfo</a>&lt;<a href="aptos_coin.md#0x1_aptos_coin_AptosCoin">AptosCoin</a>&gt;&gt;(addr);
 <b>aborts_if</b> !<b>exists</b>&lt;<a href="aggregator_factory.md#0x1_aggregator_factory_AggregatorFactory">aggregator_factory::AggregatorFactory</a>&gt;(addr);
-// This enforces <a id="high-level-req-1" href="#high-level-req">high level requirement 1</a>:
+// This enforces <a id="high-level-req-1" href="#high-level-req">high-level requirement 1</a>:
 <b>ensures</b> <b>exists</b>&lt;<a href="aptos_coin.md#0x1_aptos_coin_MintCapStore">MintCapStore</a>&gt;(addr);
-// This enforces <a id="high-level-req-3" href="#high-level-req">high level requirement 3</a>:
+// This enforces <a id="high-level-req-3" href="#high-level-req">high-level requirement 3</a>:
 <b>ensures</b> <b>global</b>&lt;<a href="aptos_coin.md#0x1_aptos_coin_MintCapStore">MintCapStore</a>&gt;(addr).mint_cap ==  MintCapability&lt;<a href="aptos_coin.md#0x1_aptos_coin_AptosCoin">AptosCoin</a>&gt; {};
 <b>ensures</b> <b>exists</b>&lt;<a href="coin.md#0x1_coin_CoinInfo">coin::CoinInfo</a>&lt;<a href="aptos_coin.md#0x1_aptos_coin_AptosCoin">AptosCoin</a>&gt;&gt;(addr);
 <b>ensures</b> result_1 == BurnCapability&lt;<a href="aptos_coin.md#0x1_aptos_coin_AptosCoin">AptosCoin</a>&gt; {};

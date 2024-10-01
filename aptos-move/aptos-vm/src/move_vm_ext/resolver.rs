@@ -6,10 +6,11 @@ use aptos_table_natives::TableResolver;
 use aptos_types::{on_chain_config::ConfigStorage, state_store::state_key::StateKey};
 use aptos_vm_types::resolver::{
     ExecutorView, ResourceGroupSize, ResourceGroupView, StateStorageView,
-    StateValueMetadataResolver,
 };
 use bytes::Bytes;
-use move_core_types::{language_storage::StructTag, resolver::MoveResolver};
+use move_binary_format::errors::PartialVMResult;
+use move_core_types::language_storage::StructTag;
+use move_vm_types::resolver::{ModuleResolver, ResourceResolver};
 use std::collections::{BTreeMap, HashMap};
 
 /// A general resolver used by AptosVM. Allows to implement custom hooks on
@@ -19,9 +20,9 @@ pub trait AptosMoveResolver:
     AggregatorV1Resolver
     + ConfigStorage
     + DelayedFieldResolver
-    + MoveResolver
+    + ModuleResolver
+    + ResourceResolver
     + ResourceGroupResolver
-    + StateValueMetadataResolver
     + StateStorageView
     + TableResolver
     + AsExecutorView
@@ -33,19 +34,19 @@ pub trait ResourceGroupResolver {
     fn release_resource_group_cache(&self)
         -> Option<HashMap<StateKey, BTreeMap<StructTag, Bytes>>>;
 
-    fn resource_group_size(&self, group_key: &StateKey) -> anyhow::Result<ResourceGroupSize>;
+    fn resource_group_size(&self, group_key: &StateKey) -> PartialVMResult<ResourceGroupSize>;
 
     fn resource_size_in_group(
         &self,
         group_key: &StateKey,
         resource_tag: &StructTag,
-    ) -> anyhow::Result<usize>;
+    ) -> PartialVMResult<usize>;
 
     fn resource_exists_in_group(
         &self,
         group_key: &StateKey,
         resource_tag: &StructTag,
-    ) -> anyhow::Result<bool>;
+    ) -> PartialVMResult<bool>;
 }
 
 pub trait AsExecutorView {

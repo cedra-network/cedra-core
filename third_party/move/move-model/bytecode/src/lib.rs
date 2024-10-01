@@ -14,6 +14,7 @@ pub mod compositional_analysis;
 pub mod dataflow_analysis;
 pub mod dataflow_domains;
 pub mod debug_instrumentation;
+pub mod fat_loop;
 pub mod function_data_builder;
 pub mod function_target;
 pub mod function_target_pipeline;
@@ -33,10 +34,15 @@ pub fn print_targets_for_test(
     env: &GlobalEnv,
     header: &str,
     targets: &FunctionTargetsHolder,
+    verbose: bool,
 ) -> String {
-    print_targets_with_annotations_for_test(env, header, targets, |target| {
-        target.register_annotation_formatters_for_test()
-    })
+    print_targets_with_annotations_for_test(
+        env,
+        header,
+        targets,
+        &|target| target.register_annotation_formatters_for_test(),
+        verbose,
+    )
 }
 
 /// Print function targets for testing and debugging.
@@ -44,7 +50,8 @@ pub fn print_targets_with_annotations_for_test(
     env: &GlobalEnv,
     header: &str,
     targets: &FunctionTargetsHolder,
-    register_annotations: impl Fn(&FunctionTarget),
+    register_annotations: &impl Fn(&FunctionTarget),
+    verbose: bool,
 ) -> String {
     let mut text = String::new();
     writeln!(&mut text, "============ {} ================", header).unwrap();
@@ -59,7 +66,11 @@ pub fn print_targets_with_annotations_for_test(
             for (variant, target) in targets.get_targets(&func_env) {
                 if !target.data.code.is_empty() || target.func_env.is_native_or_intrinsic() {
                     register_annotations(&target);
-                    writeln!(&mut text, "\n[variant {}]\n{}", variant, target).unwrap();
+                    if verbose {
+                        writeln!(&mut text, "\n[variant {}]\n{:#}", variant, target).unwrap();
+                    } else {
+                        writeln!(&mut text, "\n[variant {}]\n{}", variant, target).unwrap();
+                    }
                 }
             }
         }

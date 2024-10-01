@@ -40,7 +40,6 @@ pub const PING_INTERVAL_MS: u64 = 10_000;
 pub const PING_TIMEOUT_MS: u64 = 20_000;
 pub const PING_FAILURES_TOLERATED: u64 = 3;
 pub const CONNECTIVITY_CHECK_INTERVAL_MS: u64 = 5000;
-pub const MAX_CONCURRENT_NETWORK_REQS: usize = 100;
 pub const MAX_CONNECTION_DELAY_MS: u64 = 60_000; /* 1 minute */
 pub const MAX_FULLNODE_OUTBOUND_CONNECTIONS: usize = 6;
 pub const MAX_INBOUND_CONNECTIONS: usize = 100;
@@ -65,8 +64,6 @@ pub struct NetworkConfig {
     pub connectivity_check_interval_ms: u64,
     /// Size of all network channels
     pub network_channel_size: usize,
-    /// Maximum number of concurrent network requests
-    pub max_concurrent_network_reqs: usize,
     /// Choose a protocol to discover and dial out to other peers on this network.
     /// `DiscoveryMethod::None` disables discovery and dialing out (unless you have
     /// seed peers configured).
@@ -125,6 +122,8 @@ pub struct NetworkConfig {
     pub max_message_size: usize,
     /// The maximum number of parallel message deserialization tasks that can run (per application)
     pub max_parallel_deserialization_tasks: Option<usize>,
+    /// Whether or not to enable latency aware peer dialing
+    pub enable_latency_aware_dialing: bool,
 }
 
 impl Default for NetworkConfig {
@@ -151,7 +150,6 @@ impl NetworkConfig {
             max_connection_delay_ms: MAX_CONNECTION_DELAY_MS,
             connectivity_check_interval_ms: CONNECTIVITY_CHECK_INTERVAL_MS,
             network_channel_size: NETWORK_CHANNEL_SIZE,
-            max_concurrent_network_reqs: MAX_CONCURRENT_NETWORK_REQS,
             connection_backoff_base: CONNECTION_BACKOFF_BASE,
             ping_interval_ms: PING_INTERVAL_MS,
             ping_timeout_ms: PING_TIMEOUT_MS,
@@ -166,6 +164,7 @@ impl NetworkConfig {
             outbound_rx_buffer_size_bytes: None,
             outbound_tx_buffer_size_bytes: None,
             max_parallel_deserialization_tasks: None,
+            enable_latency_aware_dialing: true,
         };
 
         // Configure the number of parallel deserialization tasks
@@ -278,7 +277,7 @@ impl NetworkConfig {
                 let mut rng = StdRng::from_seed(OsRng.gen());
                 let key = x25519::PrivateKey::generate(&mut rng);
                 let peer_id = from_identity_public_key(key.public_key());
-                self.identity = Identity::from_config(key, peer_id);
+                self.identity = Identity::from_config_auto_generated(key, peer_id);
             },
             Identity::FromConfig(config) => {
                 if config.peer_id == PeerId::ZERO {

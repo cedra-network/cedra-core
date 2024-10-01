@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #![forbid(unsafe_code)]
+#![deny(deprecated)]
 
 //! The core Move VM logic.
 //!
@@ -22,10 +23,12 @@ pub mod session;
 #[macro_use]
 pub mod tracing;
 pub mod config;
+pub mod module_traversal;
 
 // Only include debugging functionality in debug builds
 #[cfg(any(debug_assertions, feature = "debugging"))]
 mod debug;
 
-#[cfg(test)]
-mod unit_tests;
+mod access_control;
+
+pub use loader::LoadedFunction;

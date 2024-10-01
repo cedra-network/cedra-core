@@ -5,8 +5,8 @@ use crate::schema::{
     db_metadata::{DbMetadataKey, DbMetadataSchema, DbMetadataValue},
     version_data::VersionDataSchema,
 };
-use anyhow::{anyhow, Result};
-use aptos_schemadb::{ReadOptions, SchemaBatch, DB};
+use aptos_schemadb::{SchemaBatch, DB};
+use aptos_storage_interface::{AptosDbError, Result};
 use aptos_types::transaction::Version;
 use std::sync::Arc;
 
@@ -24,7 +24,7 @@ impl LedgerMetadataPruner {
         } else {
             // NOTE: I **think** all db should have the LedgerPrunerProgress. Have a fallback path
             // here in case the database was super old before we introducing this progress counter.
-            let mut iter = ledger_metadata_db.iter::<VersionDataSchema>(ReadOptions::default())?;
+            let mut iter = ledger_metadata_db.iter::<VersionDataSchema>()?;
             iter.seek_to_first();
             let version = match iter.next().transpose()? {
                 Some((version, _)) => version,
@@ -59,6 +59,6 @@ impl LedgerMetadataPruner {
         self.ledger_metadata_db
             .get::<DbMetadataSchema>(&DbMetadataKey::LedgerPrunerProgress)?
             .map(|v| v.expect_version())
-            .ok_or_else(|| anyhow!("LedgerPrunerProgress cannot be None."))
+            .ok_or_else(|| AptosDbError::Other("LedgerPrunerProgress cannot be None.".to_string()))
     }
 }

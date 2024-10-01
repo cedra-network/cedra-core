@@ -12,13 +12,16 @@ use crate::{
     SafetyRules, TSafetyRules,
 };
 use aptos_config::config::{InitialSafetyRulesConfig, SafetyRulesConfig, SafetyRulesService};
+use aptos_crypto::bls12381::PublicKey;
+use aptos_global_constants::CONSENSUS_KEY;
 use aptos_infallible::RwLock;
+use aptos_logger::{info, warn};
 use aptos_secure_storage::{KVStorage, Storage};
-use std::{convert::TryInto, net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc, time::Instant};
 
 pub fn storage(config: &SafetyRulesConfig) -> PersistentSafetyStorage {
     let backend = &config.backend;
-    let internal_storage: Storage = backend.try_into().expect("Unable to initialize storage");
+    let internal_storage: Storage = backend.into();
     if let Err(error) = internal_storage.available() {
         panic!("Storage is not available: {:?}", error);
     }
@@ -42,19 +45,21 @@ pub fn storage(config: &SafetyRulesConfig) -> PersistentSafetyStorage {
     } else {
         let storage =
             PersistentSafetyStorage::new(internal_storage, config.enable_cached_safety_data);
-        // If it's initialized, then we can continue
-        if storage.author().is_ok() {
+
+        let mut storage = if storage.author().is_ok() {
             storage
         } else if !matches!(
             config.initial_safety_rules_config,
             InitialSafetyRulesConfig::None
         ) {
-            let identity_blob = config.initial_safety_rules_config.identity_blob();
+            let identity_blob = config
+                .initial_safety_rules_config
+                .identity_blob()
+                .expect("No identity blob in initial safety rules config");
             let waypoint = config.initial_safety_rules_config.waypoint();
 
             let backend = &config.backend;
-            let internal_storage: Storage =
-                backend.try_into().expect("Unable to initialize storage");
+            let internal_storage: Storage = backend.into();
             PersistentSafetyStorage::initialize(
                 internal_storage,
                 identity_blob
@@ -70,7 +75,31 @@ pub fn storage(config: &SafetyRulesConfig) -> PersistentSafetyStorage {
             panic!(
                 "Safety rules storage is not initialized, provide an initial safety rules config"
             )
+        };
+
+        // Ensuring all the overriding consensus keys are in the storage.
+        let timer = Instant::now();
+        for blob in config
+            .initial_safety_rules_config
+            .overriding_identity_blobs()
+            .unwrap_or_default()
+        {
+            if let Some(sk) = blob.consensus_private_key {
+                let pk_hex = hex::encode(PublicKey::from(&sk).to_bytes());
+                let storage_key = format!("{}_{}", CONSENSUS_KEY, pk_hex);
+                match storage.internal_store().set(storage_key.as_str(), sk) {
+                    Ok(_) => {
+                        info!("Setting {storage_key} succeeded.");
+                    },
+                    Err(e) => {
+                        warn!("Setting {storage_key} failed with internal store set error: {e}");
+                    },
+                }
+            }
         }
+        info!("Overriding key work time: {:?}", timer.elapsed());
+
+        storage
     }
 }
 

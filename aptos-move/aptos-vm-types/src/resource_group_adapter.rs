@@ -1,13 +1,13 @@
 // Copyright © Aptos Foundation
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::resolver::{
-    size_u32_as_uleb128, ResourceGroupSize, ResourceGroupView, TResourceGroupView, TResourceView,
+use crate::resolver::{ResourceGroupSize, ResourceGroupView, TResourceGroupView, TResourceView};
+use aptos_types::{
+    serde_helper::bcs_utils::bcs_size_of_byte_array, state_store::state_key::StateKey,
 };
-use anyhow::Error;
-use aptos_types::state_store::state_key::StateKey;
 use bytes::Bytes;
-use move_core_types::{language_storage::StructTag, value::MoveTypeLayout};
+use move_binary_format::errors::{PartialVMError, PartialVMResult};
+use move_core_types::{language_storage::StructTag, value::MoveTypeLayout, vm_status::StatusCode};
 use serde::Serialize;
 use std::{
     cell::RefCell,
@@ -30,9 +30,9 @@ pub enum GroupSizeKind {
 impl GroupSizeKind {
     pub fn from_gas_feature_version(
         gas_feature_version: u64,
-        resource_group_charge_as_size_sum_enabled: bool,
+        resource_groups_split_in_vm_change_set_enabled: bool,
     ) -> Self {
-        if resource_group_charge_as_size_sum_enabled {
+        if resource_groups_split_in_vm_change_set_enabled {
             GroupSizeKind::AsSum
         } else if gas_feature_version >= 9 {
             // Keep old caching behavior for replay.
@@ -46,20 +46,23 @@ impl GroupSizeKind {
 pub fn group_tagged_resource_size<T: Serialize + Clone + Debug>(
     tag: &T,
     value_byte_len: usize,
-) -> anyhow::Result<u64> {
-    Ok((bcs::serialized_size(&tag)? + value_byte_len + size_u32_as_uleb128(value_byte_len)) as u64)
+) -> PartialVMResult<u64> {
+    Ok((bcs::serialized_size(&tag).map_err(|e| {
+        PartialVMError::new(StatusCode::VALUE_SERIALIZATION_ERROR).with_message(format!(
+            "Tag serialization error for tag {:?}: {:?}",
+            tag, e
+        ))
+    })? + bcs_size_of_byte_array(value_byte_len)) as u64)
 }
 
 /// Utility method to compute the size of the group as GroupSizeKind::AsSum.
 pub fn group_size_as_sum<T: Serialize + Clone + Debug>(
     mut group: impl Iterator<Item = (T, usize)>,
-) -> anyhow::Result<ResourceGroupSize> {
-    let (count, len) = group
-        .try_fold((0, 0), |(count, len), (tag, value_byte_len)| {
-            let delta = group_tagged_resource_size(&tag, value_byte_len)?;
-            Ok((count + 1, len + delta))
-        })
-        .map_err(|_: Error| anyhow::Error::msg("Resource group member tag serialization error"))?;
+) -> PartialVMResult<ResourceGroupSize> {
+    let (count, len) = group.try_fold((0, 0), |(count, len), (tag, value_byte_len)| {
+        let delta = group_tagged_resource_size(&tag, value_byte_len)?;
+        Ok::<(usize, u64), PartialVMError>((count + 1, len + delta))
+    })?;
 
     Ok(ResourceGroupSize::Combined {
         num_tagged_resources: count,
@@ -83,7 +86,7 @@ fn test_group_size_same_as_bcs() {
                     address: PeerId::ONE,
                     module: Identifier::new("a").unwrap(),
                     name: Identifier::new(format!("a_{}", j)).unwrap(),
-                    type_params: vec![],
+                    type_args: vec![],
                 },
                 reused_vec.slice(0..j),
             );
@@ -119,12 +122,13 @@ impl<'r> ResourceGroupAdapter<'r> {
         maybe_resource_group_view: Option<&'r dyn ResourceGroupView>,
         resource_view: &'r dyn TResourceView<Key = StateKey, Layout = MoveTypeLayout>,
         gas_feature_version: u64,
-        resource_group_charge_as_size_sum_enabled: bool,
+        resource_groups_split_in_vm_change_set_enabled: bool,
     ) -> Self {
-        // TODO[agg_v2](fix) - when is_resource_group_split_in_change_set_capable is false,
-        // but resource_group_charge_as_size_sum_enabled is true, we still don't set
+        // when is_resource_groups_split_in_change_set_capable is false,
+        // but resource_groups_split_in_vm_change_set_enabled is true, we still don't set
         // group_size_kind to GroupSizeKind::AsSum, meaning that
-        // is_resource_group_split_in_change_set_capable affects gas charging. make sure that is correct
+        // is_resource_groups_split_in_change_set_capable affects gas charging.
+        // Onchain execution always needs to go through capable resolvers.
 
         let group_size_kind = GroupSizeKind::from_gas_feature_version(
             gas_feature_version,
@@ -136,9 +140,10 @@ impl<'r> ResourceGroupAdapter<'r> {
             //     (outside of BlockExecutor) i.e. unit tests, view functions, etc.
             //     In this case, disabled will lead to a different gas behavior,
             //     but gas is not relevant for those contexts.
-            resource_group_charge_as_size_sum_enabled
-                && maybe_resource_group_view
-                    .map_or(false, |v| v.is_resource_group_split_in_change_set_capable()),
+            resource_groups_split_in_vm_change_set_enabled
+                && maybe_resource_group_view.map_or(false, |v| {
+                    v.is_resource_groups_split_in_change_set_capable()
+                }),
         );
 
         Self {
@@ -156,7 +161,7 @@ impl<'r> ResourceGroupAdapter<'r> {
 
     // Ensures that the resource group at state_key is cached in self.group_cache. Ok(true)
     // means the resource was already cached, while Ok(false) means it just got cached.
-    fn load_to_cache(&self, group_key: &StateKey) -> anyhow::Result<bool> {
+    fn load_to_cache(&self, group_key: &StateKey) -> PartialVMResult<bool> {
         let already_cached = self.group_cache.borrow().contains_key(group_key);
         if already_cached {
             return Ok(true);
@@ -164,10 +169,16 @@ impl<'r> ResourceGroupAdapter<'r> {
 
         let group_data = self.resource_view.get_resource_bytes(group_key, None)?;
         let (group_data, blob_len): (BTreeMap<StructTag, Bytes>, u64) = group_data.map_or_else(
-            || Ok::<_, Error>((BTreeMap::new(), 0)),
+            || Ok::<_, PartialVMError>((BTreeMap::new(), 0)),
             |group_data_blob| {
-                let group_data = bcs::from_bytes(&group_data_blob)
-                    .map_err(|_| anyhow::Error::msg("Resource group deserialization error"))?;
+                let group_data = bcs::from_bytes(&group_data_blob).map_err(|e| {
+                    PartialVMError::new(StatusCode::UNEXPECTED_DESERIALIZATION_ERROR).with_message(
+                        format!(
+                            "Failed to deserialize the resource group at {:? }: {:?}",
+                            group_key, e
+                        ),
+                    )
+                })?;
                 Ok((group_data, group_data_blob.len() as u64))
             },
         )?;
@@ -194,11 +205,14 @@ impl TResourceGroupView for ResourceGroupAdapter<'_> {
     type Layout = MoveTypeLayout;
     type ResourceTag = StructTag;
 
-    fn is_resource_group_split_in_change_set_capable(&self) -> bool {
+    fn is_resource_groups_split_in_change_set_capable(&self) -> bool {
         self.group_size_kind == GroupSizeKind::AsSum
     }
 
-    fn resource_group_size(&self, group_key: &Self::GroupKey) -> anyhow::Result<ResourceGroupSize> {
+    fn resource_group_size(
+        &self,
+        group_key: &Self::GroupKey,
+    ) -> PartialVMResult<ResourceGroupSize> {
         if self.group_size_kind == GroupSizeKind::None {
             return Ok(ResourceGroupSize::zero_concrete());
         }
@@ -221,7 +235,7 @@ impl TResourceGroupView for ResourceGroupAdapter<'_> {
         group_key: &Self::GroupKey,
         resource_tag: &Self::ResourceTag,
         maybe_layout: Option<&MoveTypeLayout>,
-    ) -> anyhow::Result<Option<Bytes>> {
+    ) -> PartialVMResult<Option<Bytes>> {
         if let Some(group_view) = self.maybe_resource_group_view {
             return group_view.get_resource_from_group(group_key, resource_tag, maybe_layout);
         }
@@ -264,7 +278,8 @@ mod tests {
     use super::*;
     use crate::tests::utils::{mock_tag_0, mock_tag_1, mock_tag_2};
     use aptos_types::state_store::{
-        state_storage_usage::StateStorageUsage, state_value::StateValue, TStateView,
+        errors::StateviewError, state_storage_usage::StateStorageUsage, state_value::StateValue,
+        TStateView,
     };
     use claims::{assert_gt, assert_none, assert_ok_eq, assert_some, assert_some_eq};
     use std::cmp::max;
@@ -306,8 +321,8 @@ mod tests {
         fn new() -> Self {
             let mut group = HashMap::new();
 
-            let key_0 = StateKey::raw(vec![0]);
-            let key_1 = StateKey::raw(vec![1]);
+            let key_0 = StateKey::raw(&[0]);
+            let key_1 = StateKey::raw(&[1]);
 
             // for testing purposes, o.w. state view should never contain an empty map.
             group.insert(key_0, MockGroup::new(BTreeMap::new()));
@@ -326,14 +341,17 @@ mod tests {
     impl TStateView for MockStateView {
         type Key = StateKey;
 
-        fn get_state_value(&self, state_key: &Self::Key) -> anyhow::Result<Option<StateValue>> {
+        fn get_state_value(
+            &self,
+            state_key: &Self::Key,
+        ) -> Result<Option<StateValue>, StateviewError> {
             Ok(self
                 .group
                 .get(state_key)
                 .map(|entry| StateValue::new_legacy(entry.blob.clone().into())))
         }
 
-        fn get_usage(&self) -> anyhow::Result<StateStorageUsage> {
+        fn get_usage(&self) -> Result<StateStorageUsage, StateviewError> {
             unimplemented!();
         }
     }
@@ -343,14 +361,14 @@ mod tests {
         type Layout = MoveTypeLayout;
         type ResourceTag = StructTag;
 
-        fn is_resource_group_split_in_change_set_capable(&self) -> bool {
+        fn is_resource_groups_split_in_change_set_capable(&self) -> bool {
             true
         }
 
         fn resource_group_size(
             &self,
             group_key: &Self::GroupKey,
-        ) -> anyhow::Result<ResourceGroupSize> {
+        ) -> PartialVMResult<ResourceGroupSize> {
             Ok(self
                 .group
                 .get(group_key)
@@ -363,7 +381,7 @@ mod tests {
             group_key: &Self::GroupKey,
             resource_tag: &Self::ResourceTag,
             _maybe_layout: Option<&Self::Layout>,
-        ) -> anyhow::Result<Option<Bytes>> {
+        ) -> PartialVMResult<Option<Bytes>> {
             Ok(self
                 .group
                 .get(group_key)
@@ -374,7 +392,7 @@ mod tests {
             &self,
             _group_key: &Self::GroupKey,
             _resource_tag: &Self::ResourceTag,
-        ) -> anyhow::Result<usize> {
+        ) -> PartialVMResult<usize> {
             unimplemented!("Currently resolved by ResourceGroupAdapter");
         }
 
@@ -382,7 +400,7 @@ mod tests {
             &self,
             _group_key: &Self::GroupKey,
             _resource_tag: &Self::ResourceTag,
-        ) -> anyhow::Result<bool> {
+        ) -> PartialVMResult<bool> {
             unimplemented!("Currently resolved by ResourceGroupAdapter");
         }
 
@@ -424,7 +442,7 @@ mod tests {
         let adapter = ResourceGroupAdapter::new(None, &state_view, 3, false);
         assert_eq!(adapter.group_size_kind, GroupSizeKind::None);
 
-        let key_1 = StateKey::raw(vec![1]);
+        let key_1 = StateKey::raw(&[1]);
         let tag_0 = mock_tag_0();
 
         assert_ok_eq!(adapter.load_to_cache(&key_1), false);
@@ -438,9 +456,9 @@ mod tests {
         let adapter = ResourceGroupAdapter::new(None, &state_view, 5, false);
         assert_eq!(adapter.group_size_kind, GroupSizeKind::None);
 
-        let key_0 = StateKey::raw(vec![0]);
-        let key_1 = StateKey::raw(vec![1]);
-        let key_2 = StateKey::raw(vec![2]);
+        let key_0 = StateKey::raw(&[0]);
+        let key_1 = StateKey::raw(&[1]);
+        let key_2 = StateKey::raw(&[2]);
         let tag_0 = mock_tag_0();
         let tag_1 = mock_tag_1();
         let tag_2 = mock_tag_2();
@@ -491,19 +509,22 @@ mod tests {
 
     #[test_case(9, false)]
     #[test_case(12, true)] // Without view, this falls back to as_blob
-    fn size_as_blob_len(gas_feature_version: u64, resource_group_charge_as_size_sum_enabled: bool) {
+    fn size_as_blob_len(
+        gas_feature_version: u64,
+        resource_groups_split_in_vm_change_set_enabled: bool,
+    ) {
         let state_view = MockStateView::new();
         let adapter = ResourceGroupAdapter::new(
             None,
             &state_view,
             gas_feature_version,
-            resource_group_charge_as_size_sum_enabled,
+            resource_groups_split_in_vm_change_set_enabled,
         );
         assert_eq!(adapter.group_size_kind, GroupSizeKind::AsBlob);
 
-        let key_0 = StateKey::raw(vec![0]);
-        let key_1 = StateKey::raw(vec![1]);
-        let key_2 = StateKey::raw(vec![2]);
+        let key_0 = StateKey::raw(&[0]);
+        let key_1 = StateKey::raw(&[1]);
+        let key_2 = StateKey::raw(&[2]);
 
         let key_0_blob_len =
             ResourceGroupSize::Concrete(state_view.group.get(&key_0).unwrap().blob.len() as u64);
@@ -547,9 +568,9 @@ mod tests {
         let adapter = ResourceGroupAdapter::new(Some(&state_view), &state_view, 12, true);
         assert_eq!(adapter.group_size_kind, GroupSizeKind::AsSum);
 
-        let key_0 = StateKey::raw(vec![0]);
-        let key_1 = StateKey::raw(vec![1]);
-        let key_2 = StateKey::raw(vec![2]);
+        let key_0 = StateKey::raw(&[0]);
+        let key_1 = StateKey::raw(&[1]);
+        let key_2 = StateKey::raw(&[2]);
 
         let key_0_size_as_sum = state_view.group.get(&key_0).unwrap().size_as_sum;
         let key_1_size_as_sum = state_view.group.get(&key_1).unwrap().size_as_sum;
@@ -587,9 +608,9 @@ mod tests {
         let adapter = ResourceGroupAdapter::new(None, &state_view, 8, false);
         assert_eq!(adapter.group_size_kind, GroupSizeKind::None);
 
-        let key_0 = StateKey::raw(vec![0]);
-        let key_1 = StateKey::raw(vec![1]);
-        let key_2 = StateKey::raw(vec![2]);
+        let key_0 = StateKey::raw(&[0]);
+        let key_1 = StateKey::raw(&[1]);
+        let key_2 = StateKey::raw(&[2]);
 
         assert_ok_eq!(
             adapter.resource_group_size(&key_1),
@@ -623,9 +644,9 @@ mod tests {
         let adapter = ResourceGroupAdapter::new(None, &state_view, 0, false);
         assert_eq!(adapter.group_size_kind, GroupSizeKind::None);
 
-        let key_0 = StateKey::raw(vec![0]);
-        let key_1 = StateKey::raw(vec![1]);
-        let key_2 = StateKey::raw(vec![2]);
+        let key_0 = StateKey::raw(&[0]);
+        let key_1 = StateKey::raw(&[1]);
+        let key_2 = StateKey::raw(&[2]);
         let tag_0 = mock_tag_0();
         let tag_1 = mock_tag_1();
         let tag_2 = mock_tag_2();
@@ -654,9 +675,9 @@ mod tests {
         let adapter = ResourceGroupAdapter::new(None, &state_view, 3, false);
         assert_eq!(adapter.group_size_kind, GroupSizeKind::None);
 
-        let key_0 = StateKey::raw(vec![0]);
-        let key_1 = StateKey::raw(vec![1]);
-        let key_2 = StateKey::raw(vec![2]);
+        let key_0 = StateKey::raw(&[0]);
+        let key_1 = StateKey::raw(&[1]);
+        let key_2 = StateKey::raw(&[2]);
         let tag_0 = mock_tag_0();
         let tag_1 = mock_tag_1();
         let tag_2 = mock_tag_2();

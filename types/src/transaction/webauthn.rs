@@ -9,6 +9,8 @@ use aptos_crypto::{
 use passkey_types::{crypto::sha256, webauthn::CollectedClientData, Bytes};
 use serde::{Deserialize, Serialize};
 
+pub const MAX_WEBAUTHN_SIGNATURE_BYTES: usize = 1024;
+
 /// Returns the binary concatenation of
 /// 1. [`authenticator_data_bytes`](PartialAuthenticatorAssertionResponse) and
 /// 2. SHA-256 hash of [`client_data_json`](PartialAuthenticatorAssertionResponse),
@@ -123,6 +125,49 @@ impl PartialAuthenticatorAssertionResponse {
 
         // Check if expected challenge and actual challenge match. If there's no match, throw error
         verify_expected_challenge_from_message_matches_actual(message, challenge_bytes.as_slice())?;
+
+        // Generates binary concatenation of authenticator_data and hash(client_data_json)
+        let verification_data = generate_verification_data(
+            self.authenticator_data.as_slice(),
+            self.client_data_json.as_slice(),
+        );
+
+        // Note: We must call verify_arbitrary_msg instead of verify here. We do NOT want to
+        // use verify because it BCS serializes and prefixes the message with a hash
+        // via the signing_message function invocation
+        match (&public_key, &self.signature) {
+            (
+                AnyPublicKey::Secp256r1Ecdsa { public_key },
+                AssertionSignature::Secp256r1Ecdsa { signature },
+            ) => signature.verify_arbitrary_msg(&verification_data, public_key),
+            _ => Err(anyhow!(
+                "WebAuthn verification failure, invalid key, signature pairing"
+            )),
+        }
+    }
+
+    /// In our adaptation of WebAuthn, the `challenge` provided to `authenticatorGetAssertion`
+    /// is the SHA3-256 digest of the `RawTransaction`.
+    ///
+    /// This function should do the following:
+    /// 1. Verify `actual_challenge` and expected challenge from message are equal
+    /// 2. Construct `verification_data` as the binary concatenation of
+    ///    authenticator_data and SHA-256(client_data_json)
+    /// 3. Signature verification
+    ///
+    /// See WebAuthn §6.3.3 `authenticatorGetAssertion` for more info
+    pub fn verify_arbitrary_msg(&self, message: &[u8], public_key: &AnyPublicKey) -> Result<()> {
+        let collected_client_data: CollectedClientData =
+            serde_json::from_slice(self.client_data_json.as_slice())?;
+        let challenge_bytes = Bytes::try_from(collected_client_data.challenge.as_str())
+            .map_err(|e| anyhow!("Failed to decode challenge bytes {:?}", e))?;
+
+        // Check if expected challenge and actual challenge match. If there's no match, throw error
+        challenge_bytes
+            .as_slice()
+            .eq(message)
+            .then_some(())
+            .ok_or(CryptoMaterialError::ValidationError)?;
 
         // Generates binary concatenation of authenticator_data and hash(client_data_json)
         let verification_data = generate_verification_data(

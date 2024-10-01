@@ -191,8 +191,13 @@ impl MockNetwork {
             connected_peers: Default::default(),
             distance_from_validators: OsRng.gen(),
         };
-        let peer_monitoring_metadata =
-            PeerMonitoringMetadata::new(Some(OsRng.gen()), Some(network_info_response), None, None);
+        let peer_monitoring_metadata = PeerMonitoringMetadata::new(
+            Some(OsRng.gen()),
+            None,
+            Some(network_info_response),
+            None,
+            None,
+        );
         self.peers_and_metadata
             .update_peer_monitoring_metadata(peer_network_id, peer_monitoring_metadata)
             .unwrap();
@@ -367,7 +372,7 @@ pub fn create_mock_db_reader() -> Arc<dyn DbReader> {
 /// the functions required by the tests.
 pub struct MockDatabaseReader {}
 impl DbReader for MockDatabaseReader {
-    fn get_block_timestamp(&self, version: Version) -> anyhow::Result<u64> {
+    fn get_block_timestamp(&self, version: Version) -> aptos_storage_interface::Result<u64> {
         Ok(version * 100_000)
     }
 }

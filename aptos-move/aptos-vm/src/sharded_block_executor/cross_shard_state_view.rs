@@ -6,8 +6,8 @@ use aptos_logger::trace;
 use aptos_types::{
     block_executor::partitioner::TransactionWithDependencies,
     state_store::{
-        state_key::StateKey, state_storage_usage::StateStorageUsage, state_value::StateValue,
-        StateView, TStateView,
+        errors::StateviewError, state_key::StateKey, state_storage_usage::StateStorageUsage,
+        state_value::StateValue, StateView, TStateView,
     },
     transaction::analyzed_transaction::AnalyzedTransaction,
 };
@@ -26,7 +26,7 @@ impl<'a, S: StateView + Sync + Send> CrossShardStateView<'a, S> {
     pub fn new(cross_shard_keys: HashSet<StateKey>, base_view: &'a S) -> Self {
         let mut cross_shard_data = HashMap::new();
         trace!(
-            "Initalizing cross shard state view with {} keys",
+            "Initializing cross shard state view with {} keys",
             cross_shard_keys.len(),
         );
         for key in cross_shard_keys {
@@ -74,14 +74,14 @@ impl<'a, S: StateView + Sync + Send> CrossShardStateView<'a, S> {
 impl<'a, S: StateView + Sync + Send> TStateView for CrossShardStateView<'a, S> {
     type Key = StateKey;
 
-    fn get_state_value(&self, state_key: &StateKey) -> Result<Option<StateValue>> {
+    fn get_state_value(&self, state_key: &StateKey) -> Result<Option<StateValue>, StateviewError> {
         if let Some(value) = self.cross_shard_data.get(state_key) {
             return Ok(value.get_value());
         }
         self.base_view.get_state_value(state_key)
     }
 
-    fn get_usage(&self) -> Result<StateStorageUsage> {
+    fn get_usage(&self) -> Result<StateStorageUsage, StateviewError> {
         Ok(StateStorageUsage::new_untracked())
     }
 }
@@ -106,7 +106,7 @@ mod tests {
 
     #[test]
     fn test_cross_shard_state_view_get_state_value() {
-        let state_key = StateKey::raw("key1".as_bytes().to_owned());
+        let state_key = StateKey::raw(b"key1");
         let state_value = StateValue::from("value1".as_bytes().to_owned());
         let state_value_clone = state_value.clone();
         let state_key_clone = state_key.clone();

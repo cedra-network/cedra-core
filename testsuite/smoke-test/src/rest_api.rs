@@ -30,7 +30,7 @@ use std::{convert::TryFrom, str::FromStr, sync::Arc, time::Duration};
 
 #[tokio::test]
 async fn test_get_index() {
-    let mut swarm = new_local_swarm_with_aptos(1).await;
+    let swarm = new_local_swarm_with_aptos(1).await;
     let info = swarm.aptos_public_info();
 
     let resp = reqwest::get(info.url().to_owned()).await.unwrap();
@@ -39,7 +39,7 @@ async fn test_get_index() {
 
 #[tokio::test]
 async fn test_basic_client() {
-    let mut swarm = new_local_swarm_with_aptos(1).await;
+    let swarm = new_local_swarm_with_aptos(1).await;
     let mut info = swarm.aptos_public_info();
 
     info.client().get_ledger_information().await.unwrap();
@@ -123,6 +123,8 @@ async fn test_gas_estimation_inner(swarm: &mut LocalSwarm) {
             TransactionType::CoinTransfer {
                 invalid_transaction_ratio: 0,
                 sender_use_account_pool: false,
+                non_conflicting: false,
+                use_fa_transfer: false,
             },
             100,
         )]],
@@ -187,7 +189,6 @@ async fn test_gas_estimation_txns_limit() {
             conf.consensus.quorum_store_poll_time_ms = 200;
             conf.consensus.wait_for_full_blocks_above_pending_blocks = 0;
             conf.consensus.max_sending_block_txns = max_block_txns;
-            conf.consensus.max_sending_block_txns_quorum_store_override = max_block_txns;
             conf.consensus.quorum_store.sender_max_batch_txns = conf
                 .consensus
                 .quorum_store
@@ -226,7 +227,6 @@ async fn test_gas_estimation_gas_used_limit() {
             conf.consensus.quorum_store_poll_time_ms = 200;
             conf.consensus.wait_for_full_blocks_above_pending_blocks = 0;
             conf.consensus.max_sending_block_txns = max_block_txns;
-            conf.consensus.max_sending_block_txns_quorum_store_override = max_block_txns;
             conf.consensus.quorum_store.sender_max_batch_txns = conf
                 .consensus
                 .quorum_store
@@ -246,7 +246,7 @@ async fn test_gas_estimation_gas_used_limit() {
 
 #[tokio::test]
 async fn test_bcs() {
-    let mut swarm = new_local_swarm_with_aptos(1).await;
+    let swarm = new_local_swarm_with_aptos(1).await;
     let mut info = swarm.aptos_public_info();
 
     // Create accounts
@@ -363,7 +363,7 @@ async fn test_bcs() {
             aptos_crypto::HashValue::from(expected_transaction.transaction_info().unwrap().hash);
 
         let bcs_hash = if let Transaction::UserTransaction(ref txn) = bcs_txn.transaction {
-            txn.clone().committed_hash()
+            txn.committed_hash()
         } else {
             panic!("BCS transaction is not a user transaction! {:?}", bcs_txn);
         };
@@ -548,7 +548,7 @@ async fn test_bcs() {
 
 #[tokio::test]
 async fn test_view_function() {
-    let mut swarm = new_local_swarm_with_aptos(1).await;
+    let swarm = new_local_swarm_with_aptos(1).await;
     let info = swarm.aptos_public_info();
     let client: &Client = info.client();
 

@@ -4,10 +4,13 @@
 //! This module defines all the gas parameters for transactions, along with their initial values
 //! in the genesis and a mapping between the Rust representation and the on-chain gas schedule.
 
-use crate::gas_schedule::VMGasParameters;
+use crate::{
+    gas_schedule::VMGasParameters,
+    ver::gas_feature_versions::{RELEASE_V1_11, RELEASE_V1_12, RELEASE_V1_13, RELEASE_V1_15},
+};
 use aptos_gas_algebra::{
     AbstractValueSize, Fee, FeePerByte, FeePerGasUnit, FeePerSlot, Gas, GasExpression,
-    GasScalingFactor, GasUnit, NumSlots,
+    GasScalingFactor, GasUnit, NumModules, NumSlots, NumTypeNodes,
 };
 use move_core_types::gas_algebra::{
     InternalGas, InternalGasPerArg, InternalGasPerByte, InternalGasUnit, NumBytes, ToUnitWithParams,
@@ -22,10 +25,11 @@ crate::gas_schedule::macros::define_gas_parameters!(
     [
         // The flat minimum amount of gas required for any transaction.
         // Charged at the start of execution.
+        // It is variable to charge more for more expensive authenticators, e.g., keyless
         [
             min_transaction_gas_units: InternalGas,
             "min_transaction_gas_units",
-            3_130_000
+            2_760_000
         ],
         // Any transaction over this size will be charged an additional amount per byte.
         [
@@ -38,7 +42,7 @@ crate::gas_schedule::macros::define_gas_parameters!(
         [
             intrinsic_gas_per_byte: InternalGasPerByte,
             "intrinsic_gas_per_byte",
-            4_174
+            1_158
         ],
         // ~5 microseconds should equal one unit of computational gas. We bound the maximum
         // computational time of any given transaction at roughly 20 seconds. We want this number and
@@ -68,6 +72,11 @@ crate::gas_schedule::macros::define_gas_parameters!(
             64 * 1024
         ],
         [
+            max_transaction_size_in_bytes_gov: NumBytes,
+            { RELEASE_V1_13.. => "max_transaction_size_in_bytes.gov" },
+            1024 * 1024
+        ],
+        [
             gas_unit_scaling_factor: GasScalingFactor,
             "gas_unit_scaling_factor",
             GAS_SCALING_FACTOR
@@ -80,7 +89,7 @@ crate::gas_schedule::macros::define_gas_parameters!(
             // in cache, hence target charging 1-2 4k-sized pages for each read. Notice the cost
             // of seeking for the leaf node is covered by the first page of the "value size fee"
             // (storage_io_per_state_byte_read) defined below.
-            690_000,
+            302_385,
         ],
         [
             storage_io_per_state_byte_read: InternalGasPerByte,
@@ -88,7 +97,7 @@ crate::gas_schedule::macros::define_gas_parameters!(
             // Notice in the latest IoPricing, bytes are charged at 4k intervals (even the smallest
             // read will be charged for 4KB) to reflect the assumption that every roughly 4k bytes
             // might require a separate random IO upon the FS.
-            86,
+            151,
         ],
         [load_data_failure: InternalGas, "load_data.failure", 0],
         // Gas parameters for writing data to storage.
@@ -100,7 +109,7 @@ crate::gas_schedule::macros::define_gas_parameters!(
             // to each transactions assuming they don't touch exactly the same leaves. It's fair to
             // target roughly 1-2 full internal JMT nodes (about 0.5-1KB in total) worth of writes
             // for each write op.
-            51_000,
+            89_568,
         ],
         [
             legacy_write_data_per_new_item: InternalGasPerArg,
@@ -110,12 +119,22 @@ crate::gas_schedule::macros::define_gas_parameters!(
         [
             storage_io_per_state_byte_write: InternalGasPerByte,
             { 0..=9 => "write_data.per_byte_in_key", 10.. => "storage_io_per_state_byte_write"},
-            51,
+            89,
         ],
         [
             legacy_write_data_per_byte_in_val: InternalGasPerByte,
             { 0..=9 => "write_data.per_byte_in_val" },
             10_000
+        ],
+        [
+            storage_io_per_event_byte_write: InternalGasPerByte,
+            { RELEASE_V1_11.. => "storage_io_per_event_byte_write" },
+            89,
+        ],
+        [
+            storage_io_per_transaction_byte_write: InternalGasPerByte,
+            { RELEASE_V1_11.. => "storage_io_per_transaction_byte_write" },
+            89,
         ],
         [memory_quota: AbstractValueSize, { 1.. => "memory_quota" }, 10_000_000],
         [
@@ -124,8 +143,8 @@ crate::gas_schedule::macros::define_gas_parameters!(
             1024, // 1KB free per state write
         ],
         [
-            free_event_bytes_quota: NumBytes,
-            { 7.. => "free_event_bytes_quota" },
+            legacy_free_event_bytes_quota: NumBytes,
+            { 7..=13 => "free_event_bytes_quota", 14.. => "legacy_free_event_bytes_quota" },
             1024, // 1KB free event bytes per transaction
         ],
         [
@@ -154,39 +173,101 @@ crate::gas_schedule::macros::define_gas_parameters!(
             8192,
         ],
         [
-            storage_fee_per_state_slot_create: FeePerSlot,
-            { 7.. => "storage_fee_per_state_slot_create" },
+            legacy_storage_fee_per_state_slot_create: FeePerSlot,
+            { 7..=13 => "storage_fee_per_state_slot_create", 14.. => "legacy_storage_fee_per_state_slot_create" },
             50000,
         ],
         [
-            storage_fee_per_excess_state_byte: FeePerByte,
-            { 7.. => "storage_fee_per_excess_state_byte" },
+            storage_fee_per_state_slot: FeePerSlot,
+            { 14.. => "storage_fee_per_state_slot" },
+            // 0.8 million APT for 2 billion state slots
+            40_000,
+        ],
+        [
+            legacy_storage_fee_per_excess_state_byte: FeePerByte,
+            { 7..=13 => "storage_fee_per_excess_state_byte", 14.. => "legacy_storage_fee_per_excess_state_byte" },
             50,
         ],
         [
-            storage_fee_per_event_byte: FeePerByte,
-            { 7.. => "storage_fee_per_event_byte" },
+            storage_fee_per_state_byte: FeePerByte,
+            { 14.. => "storage_fee_per_state_byte" },
+            // 0.8 million APT for 2 TB state bytes
+            40,
+        ],
+        [
+            legacy_storage_fee_per_event_byte: FeePerByte,
+            { 7..=13 => "storage_fee_per_event_byte", 14.. => "legacy_storage_fee_per_event_byte" },
             20,
         ],
         [
-            storage_fee_per_transaction_byte: FeePerByte,
-            { 7.. => "storage_fee_per_transaction_byte" },
+            legacy_storage_fee_per_transaction_byte: FeePerByte,
+            { 7..=13 => "storage_fee_per_transaction_byte", 14.. => "legacy_storage_fee_per_transaction_byte" },
             20,
         ],
         [
             max_execution_gas: InternalGas,
             { 7.. => "max_execution_gas" },
-            4_180_000_000,
+            920_000_000, // 92ms of execution at 10k gas per ms
+        ],
+        [
+            max_execution_gas_gov: InternalGas,
+            { RELEASE_V1_13.. => "max_execution_gas.gov" },
+            4_000_000_000,
         ],
         [
             max_io_gas: InternalGas,
             { 7.. => "max_io_gas" },
-            8_000_000_000,
+            1_000_000_000, // 100ms of IO at 10k gas per ms
+        ],
+        [
+            max_io_gas_gov: InternalGas,
+            { RELEASE_V1_13.. => "max_io_gas.gov" },
+            2_000_000_000,
         ],
         [
             max_storage_fee: Fee,
             { 7.. => "max_storage_fee" },
             2_0000_0000, // 2 APT
+        ],
+        [
+            max_storage_fee_gov: Fee,
+            { RELEASE_V1_13.. => "max_storage_fee.gov" },
+            2_0000_0000,
+        ],
+        [
+            dependency_per_module: InternalGas,
+            { 15.. => "dependency_per_module" },
+            74460,
+        ],
+        [
+            dependency_per_byte: InternalGasPerByte,
+            { 15.. => "dependency_per_byte" },
+            42,
+        ],
+        [
+            max_num_dependencies: NumModules,
+            { 15.. => "max_num_dependencies" },
+            512,
+        ],
+        [
+            max_total_dependency_size: NumBytes,
+            { 15.. => "max_total_dependency_size" },
+            1024 * 1024 * 12 / 10, // 1.2 MB
+        ],
+        [
+            keyless_base_cost: InternalGas,
+            { RELEASE_V1_12.. => "keyless.base" },
+            32_000_000,
+        ],
+        [
+            max_ty_size: NumTypeNodes,
+            { RELEASE_V1_15.. => "max_ty_size" },
+            128,
+        ],
+        [
+            max_ty_depth: NumTypeNodes,
+            { RELEASE_V1_15.. => "max_ty_depth" },
+            20,
         ]
     ]
 );

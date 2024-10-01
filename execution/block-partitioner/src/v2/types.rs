@@ -1,4 +1,5 @@
 // Copyright © Aptos Foundation
+// SPDX-License-Identifier: Apache-2.0
 
 use aptos_types::block_executor::partitioner::{
     RoundId, ShardId, GLOBAL_ROUND_ID, GLOBAL_SHARD_ID,
@@ -20,10 +21,9 @@ impl Ord for SubBlockIdx {
     }
 }
 
-#[allow(clippy::non_canonical_partial_ord_impl)]
 impl PartialOrd for SubBlockIdx {
     fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
-        (self.round_id, self.shard_id).partial_cmp(&(other.round_id, other.shard_id))
+        Some(self.cmp(other))
     }
 }
 
@@ -69,11 +69,9 @@ impl Ord for ShardedTxnIndexV2 {
     }
 }
 
-#[allow(clippy::non_canonical_partial_ord_impl)]
 impl PartialOrd for ShardedTxnIndexV2 {
     fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
-        (self.sub_block_idx, self.pre_partitioned_txn_idx)
-            .partial_cmp(&(other.sub_block_idx, other.pre_partitioned_txn_idx))
+        Some(self.cmp(other))
     }
 }
 

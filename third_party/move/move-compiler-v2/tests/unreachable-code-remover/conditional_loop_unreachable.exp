@@ -1,0 +1,100 @@
+============ initial bytecode ================
+
+[variant baseline]
+fun m::test($t0: bool, $t1: bool) {
+     var $t2: u64
+     var $t3: u64
+     var $t4: u64
+     var $t5: u64
+     var $t6: u64
+     var $t7: u64
+  0: label L0
+  1: if ($t0) goto 2 else goto 21
+  2: label L2
+  3: if ($t1) goto 4 else goto 13
+  4: label L5
+  5: label L8
+  6: goto 5
+  7: label L9
+  8: $t2 := 0
+  9: $t4 := 1
+ 10: $t3 := +($t2, $t4)
+ 11: $t2 := infer($t3)
+ 12: goto 15
+ 13: label L6
+ 14: goto 25
+ 15: label L7
+ 16: $t5 := 0
+ 17: $t7 := 1
+ 18: $t6 := +($t5, $t7)
+ 19: $t5 := infer($t6)
+ 20: goto 23
+ 21: label L3
+ 22: goto 25
+ 23: label L4
+ 24: goto 0
+ 25: label L1
+ 26: return ()
+}
+
+
+Diagnostics:
+warning: Unused assignment to `i`. Consider removing or prefixing with an underscore: `_i`
+  ┌─ tests/unreachable-code-remover/conditional_loop_unreachable.move:7:17
+  │
+7 │                 i = i + 1;
+  │                 ^^^^^^^^^
+
+warning: Unused assignment to `i`. Consider removing or prefixing with an underscore: `_i`
+   ┌─ tests/unreachable-code-remover/conditional_loop_unreachable.move:12:13
+   │
+12 │             i = i + 1;
+   │             ^^^^^^^^^
+
+============ after UnreachableCodeProcessor: ================
+
+[variant baseline]
+fun m::test($t0: bool, $t1: bool) {
+     var $t2: u64 [unused]
+     var $t3: u64 [unused]
+     var $t4: u64 [unused]
+     var $t5: u64 [unused]
+     var $t6: u64 [unused]
+     var $t7: u64 [unused]
+     # maybe
+  0: if ($t0) goto 1 else goto 5
+     # maybe
+  1: label L2
+     # maybe
+  2: if ($t1) goto 3 else goto 5
+     # maybe
+  3: label L8
+     # maybe
+  4: goto 3
+     # maybe
+  5: label L1
+     # maybe
+  6: return ()
+}
+
+============ after UnreachableCodeRemover: ================
+
+[variant baseline]
+fun m::test($t0: bool, $t1: bool) {
+     var $t2: u64 [unused]
+     var $t3: u64 [unused]
+     var $t4: u64 [unused]
+     var $t5: u64 [unused]
+     var $t6: u64 [unused]
+     var $t7: u64 [unused]
+  0: if ($t0) goto 1 else goto 5
+  1: label L2
+  2: if ($t1) goto 3 else goto 5
+  3: label L8
+  4: goto 3
+  5: label L1
+  6: return ()
+}
+
+
+============ bytecode verification succeeded ========

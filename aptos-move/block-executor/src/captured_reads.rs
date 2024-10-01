@@ -1,7 +1,7 @@
 // Copyright © Aptos Foundation
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::types::InputOutputKey;
+use crate::{types::InputOutputKey, value_exchange::filter_value_for_exchange};
 use anyhow::bail;
 use aptos_aggregator::{
     delta_math::DeltaHistory,
@@ -20,7 +20,7 @@ use aptos_mvhashmap::{
     versioned_group_data::VersionedGroupData,
 };
 use aptos_types::{
-    aggregator::PanicError, state_store::state_value::StateValueMetadata,
+    delayed_fields::PanicError, state_store::state_value::StateValueMetadata,
     transaction::BlockExecutableTransaction as Transaction, write_set::TransactionWrite,
 };
 use aptos_vm_types::resolver::ResourceGroupSize;
@@ -32,7 +32,7 @@ use std::{
             Entry,
             Entry::{Occupied, Vacant},
         },
-        HashMap, HashSet,
+        BTreeMap, HashMap, HashSet,
     },
     sync::Arc,
 };
@@ -54,14 +54,14 @@ pub(crate) enum ReadKind {
 #[derive(Derivative)]
 #[derivative(Clone(bound = ""), Debug(bound = ""), PartialEq(bound = ""))]
 pub(crate) enum DataRead<V> {
-    // Version supercedes V comparison.
+    // Version supersedes V comparison.
     Versioned(
         Version,
         // Currently, we are conservative and check the version for equality
         // (version implies value equality, but not vice versa). TODO: when
         // comparing the instances of V is cheaper, compare those instead.
         #[derivative(PartialEq = "ignore", Debug = "ignore")] Arc<V>,
-        Option<Arc<MoveTypeLayout>>,
+        #[derivative(PartialEq = "ignore", Debug = "ignore")] Option<Arc<MoveTypeLayout>>,
     ),
     Metadata(Option<StateValueMetadata>),
     Exists(bool),
@@ -199,7 +199,7 @@ pub enum DelayedFieldRead {
     // are all valid and produce the same outcome.
     // Only boolean outcomes of "try_add_delta" operations have been returned to the caller,
     // and so we need to respect that those return the same outcome when doing the validation.
-    // Running inner_aggregator_value is kept only for internal bookeeping - and is used to
+    // Running inner_aggregator_value is kept only for internal bookkeeping - and is used to
     // as a value against which results are computed, but is not checked for read validation.
     // Only aggregators can be in the HistoryBounded state.
     HistoryBounded {
@@ -327,10 +327,23 @@ impl<T: Transaction> CapturedReads<T> {
     // Return an iterator over the captured reads.
     pub(crate) fn get_read_values_with_delayed_fields(
         &self,
-    ) -> impl Iterator<Item = (&T::Key, &DataRead<T::Value>)> {
+        delayed_write_set_ids: &HashSet<T::Identifier>,
+        skip: &HashSet<T::Key>,
+    ) -> Result<BTreeMap<T::Key, (StateValueMetadata, u64, Arc<MoveTypeLayout>)>, PanicError> {
         self.data_reads
             .iter()
-            .filter(|(_, v)| matches!(v, DataRead::Versioned(_, _, Some(_))))
+            .filter_map(|(key, data_read)| {
+                if skip.contains(key) {
+                    return None;
+                }
+
+                if let DataRead::Versioned(_version, value, Some(layout)) = data_read {
+                    filter_value_for_exchange::<T>(value, layout, delayed_write_set_ids, key)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     // Return an iterator over the captured group reads that contain a delayed field
@@ -584,7 +597,7 @@ impl<T: Transaction> CapturedReads<T> {
         self.group_reads.iter().all(|(key, group)| {
             let mut ret = true;
             if let Some(size) = group.collected_size {
-                ret &= Ok(size) == group_map.get_group_size(key, idx_to_validate);
+                ret &= group_map.validate_group_size(key, idx_to_validate, size);
             }
 
             ret && group.inner_reads.iter().all(|(tag, r)| {
@@ -609,7 +622,7 @@ impl<T: Transaction> CapturedReads<T> {
                     Err(Uninitialized) => {
                         unreachable!("May not be uninitialized if captured for validation");
                     },
-                    Err(TagSerializationError) => {
+                    Err(TagSerializationError(_)) => {
                         unreachable!("Should not require tag serialization");
                     },
                 }
@@ -743,9 +756,9 @@ impl<T: Transaction> UnsyncReadSet<T> {
 mod test {
     use super::*;
     use crate::proptest_types::types::{raw_metadata, KeyType, MockEvent, ValueType};
-    use aptos_aggregator::types::DelayedFieldID;
     use aptos_mvhashmap::types::StorageVersion;
     use claims::{assert_err, assert_gt, assert_matches, assert_none, assert_ok, assert_some_eq};
+    use move_vm_types::delayed_values::delayed_field_id::DelayedFieldID;
     use test_case::test_case;
 
     #[test]
@@ -1191,7 +1204,7 @@ mod test {
         let with_metadata_reads = with_metadata_reads_by_kind();
 
         let resolved = DataRead::Resolved::<ValueType>(200);
-        let mixed_reads = vec![
+        let mixed_reads = [
             deletion_reads[0].clone(),
             with_metadata_reads[1].clone(),
             resolved,

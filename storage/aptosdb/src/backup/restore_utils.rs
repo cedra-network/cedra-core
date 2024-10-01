@@ -5,20 +5,20 @@
 //! database restore operations, as required by restore and
 //! state sync v2.
 use crate::{
-    event_store::EventStore,
-    ledger_db::LedgerDbSchemaBatches,
-    ledger_store::LedgerStore,
+    ledger_db::{
+        ledger_metadata_db::LedgerMetadataDb, transaction_info_db::TransactionInfoDb,
+        write_set_db::WriteSetDb, LedgerDb, LedgerDbSchemaBatches,
+    },
     schema::{
         db_metadata::{DbMetadataKey, DbMetadataSchema, DbMetadataValue},
         transaction_accumulator::TransactionAccumulatorSchema,
     },
     state_store::StateStore,
-    transaction_store::TransactionStore,
     utils::{new_sharded_kv_schema_batch, ShardedStateKvSchemaBatch},
 };
-use anyhow::{ensure, Result};
 use aptos_crypto::HashValue;
 use aptos_schemadb::{SchemaBatch, DB};
+use aptos_storage_interface::{db_ensure as ensure, AptosDbError, Result};
 use aptos_types::{
     contract_event::ContractEvent,
     ledger_info::LedgerInfoWithSignatures,
@@ -26,45 +26,44 @@ use aptos_types::{
         definition::LeafCount,
         position::{FrozenSubTreeIterator, Position},
     },
-    transaction::{Transaction, TransactionInfo, TransactionOutput, Version},
+    transaction::{Transaction, TransactionInfo, Version},
     write_set::WriteSet,
 };
 use std::sync::Arc;
 
 /// Saves the given ledger infos to the ledger store. If a change set is provided,
 /// a batch of db alterations will be added to the change set without writing them to the db.
-pub fn save_ledger_infos(
-    ledger_metadata_db: &DB,
-    ledger_store: Arc<LedgerStore>,
+pub(crate) fn save_ledger_infos(
+    ledger_metadata_db: &LedgerMetadataDb,
     ledger_infos: &[LedgerInfoWithSignatures],
     existing_batch: Option<&mut SchemaBatch>,
 ) -> Result<()> {
     ensure!(!ledger_infos.is_empty(), "No LedgerInfos to save.");
 
     if let Some(existing_batch) = existing_batch {
-        save_ledger_infos_impl(ledger_store, ledger_infos, existing_batch)?;
+        save_ledger_infos_impl(ledger_metadata_db, ledger_infos, existing_batch)?;
     } else {
         let mut batch = SchemaBatch::new();
-        save_ledger_infos_impl(ledger_store.clone(), ledger_infos, &mut batch)?;
+        save_ledger_infos_impl(ledger_metadata_db, ledger_infos, &mut batch)?;
         ledger_metadata_db.write_schemas(batch)?;
-        update_latest_ledger_info(ledger_store, ledger_infos)?;
+        update_latest_ledger_info(ledger_metadata_db, ledger_infos)?;
     }
 
     Ok(())
 }
 
 /// Updates the latest ledger info iff a ledger info with a higher epoch is found
-pub fn update_latest_ledger_info(
-    ledger_store: Arc<LedgerStore>,
+pub(crate) fn update_latest_ledger_info(
+    ledger_metadata_db: &LedgerMetadataDb,
     ledger_infos: &[LedgerInfoWithSignatures],
 ) -> Result<()> {
-    if let Some(li) = ledger_store.get_latest_ledger_info_option() {
+    if let Some(li) = ledger_metadata_db.get_latest_ledger_info_option() {
         if li.ledger_info().epoch() > ledger_infos.last().unwrap().ledger_info().epoch() {
             // No need to update latest ledger info.
             return Ok(());
         }
     }
-    ledger_store.set_latest_ledger_info(ledger_infos.last().unwrap().clone());
+    ledger_metadata_db.set_latest_ledger_info(ledger_infos.last().unwrap().clone());
 
     Ok(())
 }
@@ -109,10 +108,8 @@ pub fn confirm_or_save_frozen_subtrees(
 /// Saves the given transactions to the db. If a change set is provided, a batch
 /// of db alterations will be added to the change set without writing them to the db.
 pub(crate) fn save_transactions(
-    ledger_store: Arc<LedgerStore>,
-    transaction_store: Arc<TransactionStore>,
-    event_store: Arc<EventStore>,
     state_store: Arc<StateStore>,
+    ledger_db: Arc<LedgerDb>,
     first_version: Version,
     txns: &[Transaction],
     txn_infos: &[TransactionInfo],
@@ -125,12 +122,10 @@ pub(crate) fn save_transactions(
     )>,
     kv_replay: bool,
 ) -> Result<()> {
-    if let Some((ledger_db_batch, state_kv_batches, state_kv_metadata_batch)) = existing_batch {
+    if let Some((ledger_db_batch, state_kv_batches, _state_kv_metadata_batch)) = existing_batch {
         save_transactions_impl(
-            Arc::clone(&ledger_store),
-            transaction_store,
-            event_store,
             state_store,
+            ledger_db,
             first_version,
             txns,
             txn_infos,
@@ -138,7 +133,6 @@ pub(crate) fn save_transactions(
             write_sets.as_ref(),
             ledger_db_batch,
             state_kv_batches,
-            state_kv_metadata_batch,
             kv_replay,
         )?;
     } else {
@@ -146,10 +140,8 @@ pub(crate) fn save_transactions(
         let mut sharded_kv_schema_batch = new_sharded_kv_schema_batch();
         let state_kv_metadata_batch = SchemaBatch::new();
         save_transactions_impl(
-            Arc::clone(&ledger_store),
-            transaction_store,
-            event_store,
             Arc::clone(&state_store),
+            Arc::clone(&ledger_db),
             first_version,
             txns,
             txn_infos,
@@ -157,7 +149,6 @@ pub(crate) fn save_transactions(
             write_sets.as_ref(),
             &mut ledger_db_batch,
             &mut sharded_kv_schema_batch,
-            &state_kv_metadata_batch,
             kv_replay,
         )?;
         // get the last version and commit to the state kv db
@@ -169,37 +160,10 @@ pub(crate) fn save_transactions(
             sharded_kv_schema_batch,
         )?;
 
-        ledger_store.ledger_db.write_schemas(ledger_db_batch)?;
-    }
-
-    Ok(())
-}
-
-/// Saves the given transaction outputs to the db. If a change set is provided, a batch
-/// of db alterations will be added to the change set without writing them to the db.
-pub fn save_transaction_outputs(
-    db: Arc<DB>,
-    transaction_store: Arc<TransactionStore>,
-    first_version: Version,
-    transaction_outputs: Vec<TransactionOutput>,
-    existing_batch: Option<&mut SchemaBatch>,
-) -> Result<()> {
-    if let Some(existing_batch) = existing_batch {
-        save_transaction_outputs_impl(
-            transaction_store,
-            first_version,
-            transaction_outputs,
-            existing_batch,
-        )?;
-    } else {
-        let mut batch = SchemaBatch::new();
-        save_transaction_outputs_impl(
-            transaction_store,
-            first_version,
-            transaction_outputs,
-            &mut batch,
-        )?;
-        db.write_schemas(batch)?;
+        ledger_db.write_schemas(ledger_db_batch)?;
+        ledger_db
+            .metadata_db()
+            .set_pre_committed_version(last_version);
     }
 
     Ok(())
@@ -207,13 +171,13 @@ pub fn save_transaction_outputs(
 
 /// A helper function that saves the ledger infos to the given change set
 fn save_ledger_infos_impl(
-    ledger_store: Arc<LedgerStore>,
+    ledger_metadata_db: &LedgerMetadataDb,
     ledger_infos: &[LedgerInfoWithSignatures],
     batch: &mut SchemaBatch,
 ) -> Result<()> {
     ledger_infos
         .iter()
-        .map(|li| ledger_store.put_ledger_info(li, batch))
+        .map(|li| ledger_metadata_db.put_ledger_info(li, batch))
         .collect::<Result<Vec<_>>>()?;
 
     Ok(())
@@ -221,10 +185,8 @@ fn save_ledger_infos_impl(
 
 /// A helper function that saves the transactions to the given change set
 pub(crate) fn save_transactions_impl(
-    ledger_store: Arc<LedgerStore>,
-    transaction_store: Arc<TransactionStore>,
-    event_store: Arc<EventStore>,
     state_store: Arc<StateStore>,
+    ledger_db: Arc<LedgerDb>,
     first_version: Version,
     txns: &[Transaction],
     txn_infos: &[TransactionInfo],
@@ -232,11 +194,10 @@ pub(crate) fn save_transactions_impl(
     write_sets: &[WriteSet],
     ledger_db_batch: &mut LedgerDbSchemaBatches,
     state_kv_batches: &mut ShardedStateKvSchemaBatch,
-    state_kv_metadata_batch: &SchemaBatch,
     kv_replay: bool,
 ) -> Result<()> {
     for (idx, txn) in txns.iter().enumerate() {
-        transaction_store.put_transaction(
+        ledger_db.transaction_db().put_transaction(
             first_version + idx as Version,
             txn,
             /*skip_index=*/ false,
@@ -244,21 +205,30 @@ pub(crate) fn save_transactions_impl(
         )?;
     }
 
-    ledger_store.put_transaction_infos(
-        first_version,
-        txn_infos,
-        &ledger_db_batch.transaction_info_db_batches,
-        &ledger_db_batch.transaction_accumulator_db_batches,
-    )?;
+    for (idx, txn_info) in txn_infos.iter().enumerate() {
+        TransactionInfoDb::put_transaction_info(
+            first_version + idx as Version,
+            txn_info,
+            &ledger_db_batch.transaction_info_db_batches,
+        )?;
+    }
 
-    event_store.put_events_multiple_versions(
+    ledger_db
+        .transaction_accumulator_db()
+        .put_transaction_accumulator(
+            first_version,
+            txn_infos,
+            &ledger_db_batch.transaction_accumulator_db_batches,
+        )?;
+
+    ledger_db.event_db().put_events_multiple_versions(
         first_version,
         events,
         &ledger_db_batch.event_db_batches,
     )?;
     // insert changes in write set schema batch
     for (idx, ws) in write_sets.iter().enumerate() {
-        transaction_store.put_write_set(
+        WriteSetDb::put_write_set(
             first_version + idx as Version,
             ws,
             &ledger_db_batch.write_set_db_batches,
@@ -271,7 +241,6 @@ pub(crate) fn save_transactions_impl(
             first_version,
             &ledger_db_batch.ledger_metadata_db_batches, // used for storing the storage usage
             state_kv_batches,
-            state_kv_metadata_batch,
             state_store.state_kv_db.enabled_sharding(),
         )?;
     }
@@ -289,20 +258,6 @@ pub(crate) fn save_transactions_impl(
             &DbMetadataKey::OverallCommitProgress,
             &DbMetadataValue::Version(last_version),
         )?;
-
-    Ok(())
-}
-
-/// A helper function that saves the transaction outputs to the given change set
-pub fn save_transaction_outputs_impl(
-    transaction_store: Arc<TransactionStore>,
-    first_version: Version,
-    transaction_outputs: Vec<TransactionOutput>,
-    batch: &mut SchemaBatch,
-) -> Result<()> {
-    for output in transaction_outputs {
-        transaction_store.put_write_set(first_version, output.write_set(), batch)?;
-    }
 
     Ok(())
 }

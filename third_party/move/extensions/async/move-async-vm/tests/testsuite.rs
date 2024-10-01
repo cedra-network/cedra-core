@@ -2,7 +2,6 @@
 // Copyright (c) The Move Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use anyhow::{bail, Error};
 use bytes::Bytes;
 use itertools::Itertools;
 use move_async_vm::{
@@ -11,8 +10,8 @@ use move_async_vm::{
     async_vm::{AsyncResult, AsyncSession, AsyncVM, Message},
     natives::GasParameters as ActorGasParameters,
 };
-use move_binary_format::access::ModuleAccess;
-use move_command_line_common::testing::EXP_EXT;
+use move_binary_format::{access::ModuleAccess, errors::PartialVMResult};
+use move_command_line_common::testing::get_compiler_exp_extension;
 use move_compiler::{
     attr_derivation, compiled_unit::CompiledUnit, diagnostics::report_diagnostics_to_buffer,
     shared::NumericalAddress, Compiler, Flags,
@@ -24,11 +23,11 @@ use move_core_types::{
     identifier::{IdentStr, Identifier},
     language_storage::{ModuleId, StructTag},
     metadata::Metadata,
-    resolver::{resource_size, ModuleResolver, ResourceResolver},
     value::MoveTypeLayout,
 };
 use move_prover_test_utils::{baseline_test::verify_or_update_baseline, extract_test_directives};
 use move_vm_test_utils::gas_schedule::GasStatus;
+use move_vm_types::resolver::{resource_size, ModuleResolver, ResourceResolver};
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -73,12 +72,12 @@ fn test_runner(path: &Path) -> datatest_stable::Result<()> {
         instances,
     )?;
     harness.run(&target_module)?;
-    let baseline_path = path.with_extension(EXP_EXT);
+    let baseline_path = path.with_extension(get_compiler_exp_extension());
     verify_or_update_baseline(baseline_path.as_path(), harness.baseline.borrow().as_str())?;
     Ok(())
 }
 
-datatest_stable::harness!(test_runner, "tests/sources", r".*\.move");
+datatest_stable::harness!(test_runner, "tests/sources", r".*\.move$");
 
 // ========================================================================================
 // Test execution
@@ -88,8 +87,8 @@ impl Harness {
         let mut gas = GasStatus::new_unmetered();
         let mut tick = 0;
         // Publish modules.
-        let mut proxy = HarnessProxy { harness: self };
-        let mut session = self.vm.new_session(test_account(), 0, &mut proxy);
+        let proxy = HarnessProxy { harness: self };
+        let mut session = self.vm.new_session(test_account(), 0, &proxy);
         let mut done = BTreeSet::new();
         for id in self.module_cache.keys() {
             self.publish_module(&mut session, id, &mut gas, &mut done)?;
@@ -103,8 +102,8 @@ impl Harness {
                 actor.short_str_lossless()
             ));
             {
-                let mut proxy = HarnessProxy { harness: self };
-                let session = self.vm.new_session(addr, 0, &mut proxy);
+                let proxy = HarnessProxy { harness: self };
+                let session = self.vm.new_session(addr, 0, &proxy);
                 let result = session.new_actor(&actor, addr, &mut gas);
                 self.handle_result(&mut mailbox, result);
             };
@@ -134,8 +133,8 @@ impl Harness {
                 ))
             }
             // Handling
-            let mut proxy = HarnessProxy { harness: self };
-            let session = self.vm.new_session(actor, tick, &mut proxy);
+            let proxy = HarnessProxy { harness: self };
+            let session = self.vm.new_session(actor, tick, &proxy);
             tick += 1000_1000; // micros
             let result = session.handle_message(actor, message_hash, args, &mut gas);
             self.handle_result(&mut mailbox, result);
@@ -271,7 +270,7 @@ impl Harness {
             // format: 0x3 Module State init message..
             let parts = actor.split_ascii_whitespace().collect_vec();
             if parts.len() < 4 {
-                bail!("malformed actor decl `{}`", actor)
+                anyhow::bail!("malformed actor decl `{}`", actor)
             }
             let address = AccountAddress::from_hex_literal(parts[0])?;
             let module = Identifier::from_str(parts[1])?;
@@ -281,7 +280,7 @@ impl Harness {
                 address,
                 module: module.clone(),
                 name: struct_,
-                type_params: vec![],
+                type_args: vec![],
             };
             let mut messages = vec![];
             for message in &parts[4..] {
@@ -306,7 +305,7 @@ impl Harness {
             // where the last address is where the instance is to create
             let parts = inst.split_ascii_whitespace().collect_vec();
             if parts.len() != 3 {
-                bail!("malformed instance decl `{}`", inst)
+                anyhow::bail!("malformed instance decl `{}`", inst)
             }
             let address = AccountAddress::from_hex_literal(parts[0])?;
             let module = Identifier::from_str(parts[1])?;
@@ -333,7 +332,7 @@ impl Harness {
                 }
             }
             if !found {
-                bail!("dependency {} not found", dep)
+                anyhow::bail!("dependency {} not found", dep)
             }
         }
         Ok(module_files)
@@ -357,7 +356,7 @@ impl Harness {
                 Compiler::from_files(targets, deps, address_map.clone(), flags, &known_attributes);
             let (sources, inner) = compiler.build()?;
             match inner {
-                Err(diags) => bail!(
+                Err(diags) => anyhow::bail!(
                     "Compilation failure {{\n{}\n}}",
                     String::from_utf8_lossy(
                         report_diagnostics_to_buffer(&sources, diags).as_slice()
@@ -387,7 +386,7 @@ impl<'a> ModuleResolver for HarnessProxy<'a> {
         vec![]
     }
 
-    fn get_module(&self, id: &ModuleId) -> Result<Option<Bytes>, Error> {
+    fn get_module(&self, id: &ModuleId) -> PartialVMResult<Option<Bytes>> {
         Ok(self
             .harness
             .module_cache
@@ -403,7 +402,7 @@ impl<'a> ResourceResolver for HarnessProxy<'a> {
         typ: &StructTag,
         _metadata: &[Metadata],
         _maybe_layout: Option<&MoveTypeLayout>,
-    ) -> anyhow::Result<(Option<Bytes>, usize)> {
+    ) -> PartialVMResult<(Option<Bytes>, usize)> {
         let res = self
             .harness
             .resource_store

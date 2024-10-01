@@ -41,8 +41,6 @@ pub struct IndexerGrpcConfig {
 
     /// Number of transactions returned in a single stream response
     pub output_batch_size: u16,
-
-    pub enable_expensive_logging: bool,
 }
 
 impl Debug for IndexerGrpcConfig {
@@ -57,7 +55,6 @@ impl Debug for IndexerGrpcConfig {
             .field("processor_task_count", &self.processor_task_count)
             .field("processor_batch_size", &self.processor_batch_size)
             .field("output_batch_size", &self.output_batch_size)
-            .field("enable_expensive_logging", &self.enable_expensive_logging)
             .finish()
     }
 }
@@ -77,7 +74,6 @@ impl Default for IndexerGrpcConfig {
             processor_task_count: DEFAULT_PROCESSOR_TASK_COUNT,
             processor_batch_size: DEFAULT_PROCESSOR_BATCH_SIZE,
             output_batch_size: DEFAULT_OUTPUT_BATCH_SIZE,
-            enable_expensive_logging: false,
         }
     }
 }
@@ -94,10 +90,15 @@ impl ConfigSanitizer for IndexerGrpcConfig {
             return Ok(());
         }
 
-        if !node_config.storage.enable_indexer && !node_config.indexer_table_info.enabled {
+        if !node_config.storage.enable_indexer
+            && !node_config
+                .indexer_table_info
+                .table_info_service_mode
+                .is_enabled()
+        {
             return Err(Error::ConfigSanitizerFailed(
                 sanitizer_name,
-                "storage.enable_indexer or indexer_table_info.enabled must be true if indexer_grpc.enabled is true".to_string(),
+                "storage.enable_indexer must be true or indexer_table_info.table_info_service_mode must be IndexingOnly if indexer_grpc.enabled is true".to_string(),
             ));
         }
         Ok(())
@@ -117,19 +118,6 @@ impl ConfigOptimizer for IndexerGrpcConfig {
             return Ok(false);
         }
 
-        // TODO: we really shouldn't be overriding the configs if they are
-        // specified in the local node config file. This optimizer should
-        // migrate to the pattern used by other optimizers, but for now, we'll
-        // just keep the legacy behaviour to avoid breaking anything.
-
-        // Override with environment variables if they are set
-        indexer_config.enable_expensive_logging = env_var_or_default(
-            "INDEXER_GRPC_ENABLE_EXPENSIVE_LOGGING",
-            Some(indexer_config.enable_expensive_logging),
-            None,
-        )
-        .unwrap_or(false);
-
         Ok(true)
     }
 }
@@ -137,7 +125,7 @@ impl ConfigOptimizer for IndexerGrpcConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{IndexerTableInfoConfig, StorageConfig};
+    use crate::config::{IndexerTableInfoConfig, StorageConfig, TableInfoServiceMode};
 
     #[test]
     fn test_sanitize_enable_indexer() {
@@ -145,7 +133,7 @@ mod tests {
         let mut storage_config = StorageConfig::default();
         let mut table_info_config = IndexerTableInfoConfig::default();
         storage_config.enable_indexer = false;
-        table_info_config.enabled = false;
+        table_info_config.table_info_service_mode = TableInfoServiceMode::Disabled;
 
         // Create a node config with the indexer enabled, but the storage indexer disabled
         let mut node_config = NodeConfig {
@@ -187,30 +175,10 @@ mod tests {
         assert!(matches!(error, Error::ConfigSanitizerFailed(_, _)));
 
         // Enable the table info service
-        node_config.indexer_table_info.enabled = true;
+        node_config.indexer_table_info.table_info_service_mode = TableInfoServiceMode::IndexingOnly;
 
         // Sanitize the config and verify that it now succeeds
         IndexerGrpcConfig::sanitize(&node_config, NodeType::Validator, Some(ChainId::mainnet()))
             .unwrap();
-    }
-}
-
-/// Returns the value of the environment variable `env_var`
-/// if it is set, otherwise returns `default`.
-fn env_var_or_default<T: std::str::FromStr>(
-    env_var: &'static str,
-    default: Option<T>,
-    expected_message: Option<String>,
-) -> Option<T> {
-    let partial = std::env::var(env_var).ok().map(|s| s.parse().ok());
-    match default {
-        None => partial.unwrap_or_else(|| {
-            panic!(
-                "{}",
-                expected_message
-                    .unwrap_or_else(|| { format!("Expected env var {} to be set", env_var) })
-            )
-        }),
-        Some(default_value) => partial.unwrap_or(Some(default_value)),
     }
 }

@@ -1,7 +1,7 @@
 // Copyright © Aptos Foundation
 // SPDX-License-Identifier: Apache-2.0
 
-use anyhow::Result;
+use aptos_storage_interface::Result;
 use aptos_types::transaction::Version;
 use std::cmp::min;
 
@@ -24,6 +24,7 @@ pub trait DBPruner: Send + Sync {
 
     /// Returns the target version for the current pruning round - this might be different from the
     /// target_version() because we need to keep max_version in account.
+    #[allow(unused)]
     fn get_current_batch_target(&self, max_versions: Version) -> Version {
         // Current target version  might be less than the target version to ensure we don't prune
         // more than max_version in one go.

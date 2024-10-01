@@ -115,7 +115,9 @@ impl TransactionAnalysis {
             UserTransaction(signed_txn) => signed_txn.raw_txn_bytes_len(),
             GenesisTransaction(_)
             | BlockMetadata(_)
+            | BlockMetadataExt(_)
             | StateCheckpoint(_)
+            | BlockEpilogue(_)
             | ValidatorTransaction(_) => bcs::serialized_size(txn).expect("Txn should serialize"),
         }
     }

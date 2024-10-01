@@ -11,7 +11,6 @@ pub(crate) mod stream;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_utils;
 
-use anyhow::{anyhow, Result};
 use aptos_config::config::{
     RocksdbConfig, RocksdbConfigs, StorageDirPaths, BUFFERED_STATE_TARGET_ITEMS,
     DEFAULT_MAX_NUM_NODES_PER_LRU_CACHE_SHARD, NO_OP_STORAGE_PRUNER_CONFIG,
@@ -22,13 +21,15 @@ use aptos_db::{
     db::AptosDB,
     get_restore_handler::GetRestoreHandler,
     state_restore::{
-        StateSnapshotProgress, StateSnapshotRestore, StateSnapshotRestoreMode, StateValueBatch,
-        StateValueWriter,
+        StateSnapshotRestore, StateSnapshotRestoreMode, StateValueBatch, StateValueWriter,
     },
 };
+use aptos_db_indexer_schemas::metadata::StateSnapshotProgress;
+use aptos_indexer_grpc_table_info::internal_indexer_db_service::InternalIndexerDBService;
 use aptos_infallible::duration_since_epoch;
 use aptos_jellyfish_merkle::{NodeBatch, TreeWriter};
 use aptos_logger::info;
+use aptos_storage_interface::{AptosDbError, Result};
 use aptos_types::{
     state_store::{
         state_key::StateKey, state_storage_usage::StateStorageUsage, state_value::StateValue,
@@ -55,6 +56,13 @@ pub struct GlobalBackupOpt {
         help = "Maximum chunk file size in bytes."
     )]
     pub max_chunk_size: usize,
+    #[clap(
+        long,
+        default_value_t = 8,
+        help = "When applicable (currently only for state snapshot backups), the number of \
+        concurrent requests to the fullnode backup service. "
+    )]
+    pub concurrent_data_requests: usize,
 }
 
 #[derive(Clone, Parser)]
@@ -150,6 +158,9 @@ pub struct GlobalRestoreOpt {
 
     #[clap(flatten)]
     pub replay_concurrency_level: ReplayConcurrencyLevelOpt,
+
+    #[clap(long, help = "Restore the state indices when restore the snapshot")]
+    pub enable_state_indices: bool,
 }
 
 pub enum RestoreRunMode {
@@ -175,7 +186,7 @@ impl StateValueWriter<StateKey, StateValue> for MockStore {
         Ok(())
     }
 
-    fn write_usage(&self, _version: Version, _usage: StateStorageUsage) -> Result<()> {
+    fn kv_finish(&self, _version: Version, _usage: StateStorageUsage) -> Result<()> {
         Ok(())
     }
 
@@ -276,13 +287,18 @@ pub struct GlobalRestoreOptions {
 impl TryFrom<GlobalRestoreOpt> for GlobalRestoreOptions {
     type Error = anyhow::Error;
 
-    fn try_from(opt: GlobalRestoreOpt) -> Result<Self> {
+    fn try_from(opt: GlobalRestoreOpt) -> anyhow::Result<Self> {
         let target_version = opt.target_version.unwrap_or(Version::max_value());
         let concurrent_downloads = opt.concurrent_downloads.get();
         let replay_concurrency_level = opt.replay_concurrency_level.get();
         let run_mode = if let Some(db_dir) = &opt.db_dir {
             // for restore, we can always start state store with empty buffered_state since we will restore
             // TODO(grao): Support path override here.
+            let internal_indexer_db = if opt.enable_state_indices {
+                InternalIndexerDBService::get_indexer_db_for_restore(db_dir.as_path())
+            } else {
+                None
+            };
             let restore_handler = Arc::new(AptosDB::open_kv_only(
                 StorageDirPaths::from_path(db_dir),
                 false,                       /* read_only */
@@ -291,7 +307,7 @@ impl TryFrom<GlobalRestoreOpt> for GlobalRestoreOptions {
                 false, /* indexer */
                 BUFFERED_STATE_TARGET_ITEMS,
                 DEFAULT_MAX_NUM_NODES_PER_LRU_CACHE_SHARD,
-                false, /* indexer async v2 */
+                internal_indexer_db,
             )?)
             .get_restore_handler();
 
@@ -333,7 +349,10 @@ impl TrustedWaypointOpt {
             trusted_waypoints
                 .insert(w.version(), w)
                 .map_or(Ok(()), |w| {
-                    Err(anyhow!("Duplicated waypoints at version {}", w.version()))
+                    Err(AptosDbError::Other(format!(
+                        "Duplicated waypoints at version {}",
+                        w.version()
+                    )))
                 })?;
         }
         Ok(trusted_waypoints)
@@ -360,6 +379,9 @@ impl ConcurrentDownloadsOpt {
         ret
     }
 }
+
+#[derive(Clone, Copy, Default, Parser)]
+pub struct ConcurrentDataRequestsOpt {}
 
 #[derive(Clone, Copy, Default, Parser)]
 pub struct ReplayConcurrencyLevelOpt {
@@ -402,7 +424,7 @@ impl<T: AsRef<Path>> PathToString for T {
             .to_path_buf()
             .into_os_string()
             .into_string()
-            .map_err(|s| anyhow!("into_string failed for OsString '{:?}'", s))
+            .map_err(|s| AptosDbError::Other(format!("into_string failed for OsString '{:?}'", s)))
     }
 }
 

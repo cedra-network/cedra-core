@@ -108,12 +108,12 @@ spec aptos_framework::staking_config {
         let addr = signer::address_of(aptos_framework);
         /// [high-level-req-1.1]
         aborts_if addr != @aptos_framework;
-        aborts_if minimum_stake > maximum_stake || maximum_stake <= 0;
+        aborts_if minimum_stake > maximum_stake || maximum_stake == 0;
         /// [high-level-req-3.1]
-        aborts_if recurring_lockup_duration_secs <= 0;
-        aborts_if rewards_rate_denominator <= 0;
+        aborts_if recurring_lockup_duration_secs == 0;
+        aborts_if rewards_rate_denominator == 0;
         /// [high-level-req-2.1]
-        aborts_if voting_power_increase_limit <= 0 || voting_power_increase_limit > 50;
+        aborts_if voting_power_increase_limit == 0 || voting_power_increase_limit > 50;
         aborts_if rewards_rate > MAX_REWARDS_RATE;
         aborts_if rewards_rate > rewards_rate_denominator;
         aborts_if exists<StakingConfig>(addr);
@@ -133,6 +133,7 @@ spec aptos_framework::staking_config {
         rewards_rate_decrease_rate: FixedPoint64,
     ) {
         use std::signer;
+        pragma verify_duration_estimate = 120;
         requires exists<timestamp::CurrentTimeMicroseconds>(@aptos_framework);
         let addr = signer::address_of(aptos_framework);
         /// [high-level-req-1.2]
@@ -154,6 +155,15 @@ spec aptos_framework::staking_config {
                 result_1 <= MAX_REWARDS_RATE && result_2 <= MAX_U64;
     }
 
+    spec reward_rate(): (u64, u64) {
+        let config = global<StakingConfig>(@aptos_framework);
+        aborts_if !exists<StakingConfig>(@aptos_framework);
+        include StakingRewardsConfigRequirement;
+        ensures (features::spec_periodical_reward_rate_decrease_enabled() &&
+            (global<StakingRewardsConfig>(@aptos_framework).rewards_rate.value as u64) != 0) ==>
+            result_1 <= MAX_REWARDS_RATE && result_2 <= MAX_U64;
+    }
+
     spec calculate_and_save_latest_epoch_rewards_rate(): FixedPoint64 {
         pragma verify_duration_estimate = 120;
         aborts_if !exists<StakingRewardsConfig>(@aptos_framework);
@@ -162,6 +172,7 @@ spec aptos_framework::staking_config {
     }
 
     spec calculate_and_save_latest_rewards_config(): StakingRewardsConfig {
+        pragma verify_duration_estimate = 120;
         requires features::spec_periodical_reward_rate_decrease_enabled();
         include StakingRewardsConfigRequirement;
         aborts_if !exists<StakingRewardsConfig>(@aptos_framework);
@@ -179,7 +190,7 @@ spec aptos_framework::staking_config {
         let addr = signer::address_of(aptos_framework);
         /// [high-level-req-1.3]
         aborts_if addr != @aptos_framework;
-        aborts_if minimum_stake > maximum_stake || maximum_stake <= 0;
+        aborts_if minimum_stake > maximum_stake || maximum_stake == 0;
         aborts_if !exists<StakingConfig>(@aptos_framework);
         ensures global<StakingConfig>(@aptos_framework).minimum_stake == minimum_stake &&
             global<StakingConfig>(@aptos_framework).maximum_stake == maximum_stake;
@@ -197,7 +208,7 @@ spec aptos_framework::staking_config {
         /// [high-level-req-1.4]
         aborts_if addr != @aptos_framework;
         /// [high-level-req-3.2]
-        aborts_if new_recurring_lockup_duration_secs <= 0;
+        aborts_if new_recurring_lockup_duration_secs == 0;
         aborts_if !exists<StakingConfig>(@aptos_framework);
         ensures global<StakingConfig>(@aptos_framework).recurring_lockup_duration_secs == new_recurring_lockup_duration_secs;
     }
@@ -217,7 +228,7 @@ spec aptos_framework::staking_config {
         let addr = signer::address_of(aptos_framework);
         /// [high-level-req-1.5]
         aborts_if addr != @aptos_framework;
-        aborts_if new_rewards_rate_denominator <= 0;
+        aborts_if new_rewards_rate_denominator == 0;
         aborts_if !exists<StakingConfig>(@aptos_framework);
         aborts_if new_rewards_rate > MAX_REWARDS_RATE;
         aborts_if new_rewards_rate > new_rewards_rate_denominator;
@@ -236,6 +247,7 @@ spec aptos_framework::staking_config {
         rewards_rate_decrease_rate: FixedPoint64,
     ) {
         use std::signer;
+        pragma verify_duration_estimate = 120; // verified but takes long
         include StakingRewardsConfigRequirement;
         let addr = signer::address_of(aptos_framework);
         /// [high-level-req-1.6]
@@ -262,14 +274,14 @@ spec aptos_framework::staking_config {
         /// [high-level-req-1.7]
         aborts_if addr != @aptos_framework;
         /// [high-level-req-2.2]
-        aborts_if new_voting_power_increase_limit <= 0 || new_voting_power_increase_limit > 50;
+        aborts_if new_voting_power_increase_limit == 0 || new_voting_power_increase_limit > 50;
         aborts_if !exists<StakingConfig>(@aptos_framework);
         ensures global<StakingConfig>(@aptos_framework).voting_power_increase_limit == new_voting_power_increase_limit;
     }
 
     /// The maximum_stake must be greater than maximum_stake in the range of Specified stake and the maximum_stake greater than zero.
     spec validate_required_stake(minimum_stake: u64, maximum_stake: u64) {
-        aborts_if minimum_stake > maximum_stake || maximum_stake <= 0;
+        aborts_if minimum_stake > maximum_stake || maximum_stake == 0;
     }
 
     /// Abort at any condition in StakingRewardsConfigValidationAborts.
@@ -296,7 +308,7 @@ spec aptos_framework::staking_config {
             rewards_rate,
             fixed_point64::spec_create_from_u128((1u128)));
         aborts_if fixed_point64::spec_greater(min_rewards_rate, rewards_rate);
-        aborts_if rewards_rate_period_in_secs <= 0;
+        aborts_if rewards_rate_period_in_secs == 0;
         aborts_if fixed_point64::spec_ceil(rewards_rate_decrease_rate) > 1;
     }
 

@@ -4,8 +4,9 @@
 #![forbid(unsafe_code)]
 
 use crate::{
-    metrics, storage::StorageReader, PeerMonitoringServiceNetworkEvents,
-    PeerMonitoringServiceServer, MAX_DISTANCE_FROM_VALIDATORS, PEER_MONITORING_SERVER_VERSION,
+    metrics, storage::StorageReader, tests::database_mock::MockDatabaseReader,
+    PeerMonitoringServiceNetworkEvents, PeerMonitoringServiceServer, MAX_DISTANCE_FROM_VALIDATORS,
+    PEER_MONITORING_SERVER_VERSION,
 };
 use aptos_channels::{aptos_channel, message_queues::QueueStyle};
 use aptos_config::{
@@ -19,11 +20,12 @@ use aptos_network::{
     application::{
         interface::NetworkServiceEvents, metadata::ConnectionState, storage::PeersAndMetadata,
     },
-    peer_manager::PeerManagerNotification,
     protocols::{
-        network::{NetworkEvents, NewNetworkEvents},
-        rpc::InboundRpcRequest,
-        wire::handshake::v1::{MessagingProtocolVersion, ProtocolId, ProtocolIdSet},
+        network::{NetworkEvents, NewNetworkEvents, ReceivedMessage},
+        wire::{
+            handshake::v1::{MessagingProtocolVersion, ProtocolId, ProtocolIdSet},
+            messaging::v1::{NetworkMessage, RpcRequest},
+        },
     },
     transport::{ConnectionId, ConnectionMetadata},
 };
@@ -58,7 +60,6 @@ use aptos_types::{
     },
     PeerId,
 };
-use cfg_block::cfg_block;
 use futures::channel::oneshot;
 use maplit::btreemap;
 use mockall::mock;
@@ -134,7 +135,7 @@ async fn test_get_network_information_fullnode() {
         distance_from_validators: peer_distance_1,
     };
     let peer_monitoring_metadata_1 =
-        PeerMonitoringMetadata::new(None, Some(latest_network_info_response), None, None);
+        PeerMonitoringMetadata::new(None, None, Some(latest_network_info_response), None, None);
     peers_and_metadata
         .update_peer_monitoring_metadata(peer_network_id_1, peer_monitoring_metadata_1.clone())
         .unwrap();
@@ -154,7 +155,7 @@ async fn test_get_network_information_fullnode() {
         distance_from_validators: peer_distance_1,
     };
     let peer_monitoring_metadata_1 =
-        PeerMonitoringMetadata::new(None, Some(latest_network_info_response), None, None);
+        PeerMonitoringMetadata::new(None, None, Some(latest_network_info_response), None, None);
     peers_and_metadata
         .update_peer_monitoring_metadata(peer_network_id_1, peer_monitoring_metadata_1.clone())
         .unwrap();
@@ -182,7 +183,7 @@ async fn test_get_network_information_fullnode() {
         distance_from_validators: peer_distance_2,
     };
     let peer_monitoring_metadata_2 =
-        PeerMonitoringMetadata::new(None, Some(latest_network_info_response), None, None);
+        PeerMonitoringMetadata::new(None, None, Some(latest_network_info_response), None, None);
     peers_and_metadata
         .insert_connection_metadata(peer_network_id_2, connection_metadata_2.clone())
         .unwrap();
@@ -251,7 +252,7 @@ async fn test_get_network_information_validator() {
         distance_from_validators: peer_distance_1,
     };
     let peer_monitoring_metadata_1 =
-        PeerMonitoringMetadata::new(None, Some(latest_network_info_response), None, None);
+        PeerMonitoringMetadata::new(None, None, Some(latest_network_info_response), None, None);
     peers_and_metadata
         .update_peer_monitoring_metadata(peer_network_id_1, peer_monitoring_metadata_1.clone())
         .unwrap();
@@ -270,7 +271,7 @@ async fn test_get_network_information_validator() {
         distance_from_validators: peer_distance_2,
     };
     let peer_monitoring_metadata_2 =
-        PeerMonitoringMetadata::new(None, Some(latest_network_info_response), None, None);
+        PeerMonitoringMetadata::new(None, None, Some(latest_network_info_response), None, None);
     peers_and_metadata
         .insert_connection_metadata(peer_network_id_2, connection_metadata_2.clone())
         .unwrap();
@@ -385,39 +386,6 @@ async fn test_latency_ping_request() {
     }
 }
 
-cfg_block! {
-    #[cfg(feature = "network-perf-test")] { // Disabled by default
-        #[tokio::test]
-        async fn test_performance_monitoring_request() {
-            // Create the peer monitoring client and server
-            let (mut mock_client, service, _, _) = MockClient::new(None, None, None);
-            tokio::spawn(service.start());
-
-            // Process several performance monitoring requests
-            for i in 0..10 {
-                let request = PeerMonitoringServiceRequest::PerformanceMonitoringRequest(
-                    aptos_peer_monitoring_service_types::request::PerformanceMonitoringRequest {
-                        request_counter: i,
-                        data: [0; 100].to_vec(), // 100 bytes of zero's
-                    },
-                );
-                let response = mock_client.send_request(request).await.unwrap();
-                match response {
-                    PeerMonitoringServiceResponse::PerformanceMonitoring(
-                        performance_monitoring_response,
-                    ) => {
-                        assert_eq!(performance_monitoring_response.response_counter, i);
-                    },
-                    _ => panic!(
-                        "Expected performance monitoring response but got: {:?}",
-                        response
-                    ),
-                }
-            }
-        }
-    }
-}
-
 /// A simple utility function to create a new connection metadata for tests
 fn create_connection_metadata(peer_id: AccountAddress, peer_role: PeerRole) -> ConnectionMetadata {
     ConnectionMetadata::new(
@@ -501,7 +469,7 @@ async fn verify_node_information(
 /// mock client requests to a peer monitoring service server.
 struct MockClient {
     peer_manager_notifiers:
-        HashMap<NetworkId, aptos_channel::Sender<(PeerId, ProtocolId), PeerManagerNotification>>,
+        HashMap<NetworkId, aptos_channel::Sender<(PeerId, ProtocolId), ReceivedMessage>>,
 }
 
 impl MockClient {
@@ -538,13 +506,8 @@ impl MockClient {
             .queue_style(QueueStyle::FIFO)
             .counters(&metrics::PENDING_PEER_MONITORING_SERVER_NETWORK_EVENTS);
             let (peer_manager_notifier, peer_manager_notification_receiver) = queue_cfg.build();
-            let (_, connection_notification_receiver) = queue_cfg.build();
 
-            let network_events = NetworkEvents::new(
-                peer_manager_notification_receiver,
-                connection_notification_receiver,
-                None,
-            );
+            let network_events = NetworkEvents::new(peer_manager_notification_receiver, None, true);
             network_and_events.insert(network_id, network_events);
             peer_manager_notifiers.insert(network_id, peer_manager_notifier);
         }
@@ -592,12 +555,17 @@ impl MockClient {
             .to_bytes(&PeerMonitoringServiceMessage::Request(request))
             .unwrap();
         let (request_sender, request_receiver) = oneshot::channel();
-        let inbound_rpc = InboundRpcRequest {
-            protocol_id,
-            data: request_data.into(),
-            res_tx: request_sender,
+        let request_notification = ReceivedMessage {
+            message: NetworkMessage::RpcRequest(RpcRequest {
+                protocol_id,
+                request_id: 42,
+                priority: 0,
+                raw_request: request_data.clone(),
+            }),
+            sender: PeerNetworkId::new(network_id, peer_id),
+            receive_timestamp_micros: 0,
+            rpc_replier: Some(Arc::new(request_sender)),
         };
-        let request_notification = PeerManagerNotification::RecvRpc(peer_id, inbound_rpc);
 
         // Send the request to the peer monitoring service
         self.peer_manager_notifiers
@@ -646,130 +614,137 @@ pub fn create_mock_db_reader() -> MockDatabaseReader {
 // This automatically creates a MockDatabaseReader.
 // TODO(joshlind): if we frequently use these mocks, we should define a single
 // mock test crate to be shared across the codebase.
-mock! {
-    pub DatabaseReader {}
-    impl DbReader for DatabaseReader {
-        fn get_epoch_ending_ledger_infos(
-            &self,
-            start_epoch: u64,
-            end_epoch: u64,
-        ) -> anyhow::Result<EpochChangeProof>;
+mod database_mock {
+    use super::*;
+    use aptos_storage_interface::Result;
 
-        fn get_transactions(
-            &self,
-            start_version: Version,
-            batch_size: u64,
-            ledger_version: Version,
-            fetch_events: bool,
-        ) -> anyhow::Result<TransactionListWithProof>;
+    mock! {
+        pub DatabaseReader {}
+        impl DbReader for DatabaseReader {
+            fn get_epoch_ending_ledger_infos(
+                &self,
+                start_epoch: u64,
+                end_epoch: u64,
+            ) -> Result<EpochChangeProof>;
 
-        fn get_transaction_by_hash(
-            &self,
-            hash: HashValue,
-            ledger_version: Version,
-            fetch_events: bool,
-        ) -> anyhow::Result<Option<TransactionWithProof>>;
+            fn get_transactions(
+                &self,
+                start_version: Version,
+                batch_size: u64,
+                ledger_version: Version,
+                fetch_events: bool,
+            ) -> Result<TransactionListWithProof>;
 
-        fn get_transaction_by_version(
-            &self,
-            version: Version,
-            ledger_version: Version,
-            fetch_events: bool,
-        ) -> anyhow::Result<TransactionWithProof>;
+            fn get_transaction_by_hash(
+                &self,
+                hash: HashValue,
+                ledger_version: Version,
+                fetch_events: bool,
+            ) -> Result<Option<TransactionWithProof>>;
 
-        fn get_first_txn_version(&self) -> anyhow::Result<Option<Version>>;
+            fn get_transaction_by_version(
+                &self,
+                version: Version,
+                ledger_version: Version,
+                fetch_events: bool,
+            ) -> Result<TransactionWithProof>;
 
-        fn get_first_write_set_version(&self) -> anyhow::Result<Option<Version>>;
+            fn get_first_txn_version(&self) -> Result<Option<Version>>;
 
-        fn get_transaction_outputs(
-            &self,
-            start_version: Version,
-            limit: u64,
-            ledger_version: Version,
-        ) -> anyhow::Result<TransactionOutputListWithProof>;
+            fn get_first_write_set_version(&self) -> Result<Option<Version>>;
 
-        fn get_events(
-            &self,
-            event_key: &EventKey,
-            start: u64,
-            order: Order,
-            limit: u64,
-            ledger_version: Version,
-        ) -> anyhow::Result<Vec<EventWithVersion>>;
+            fn get_transaction_outputs(
+                &self,
+                start_version: Version,
+                limit: u64,
+                ledger_version: Version,
+            ) -> Result<TransactionOutputListWithProof>;
 
-        fn get_block_timestamp(&self, version: u64) -> anyhow::Result<u64>;
+            fn get_events(
+                &self,
+                event_key: &EventKey,
+                start: u64,
+                order: Order,
+                limit: u64,
+                ledger_version: Version,
+            ) -> Result<Vec<EventWithVersion>>;
 
-        fn get_last_version_before_timestamp(
-            &self,
-            _timestamp: u64,
-            _ledger_version: Version,
-        ) -> anyhow::Result<Version>;
+            fn get_block_timestamp(&self, version: u64) -> Result<u64>;
 
-        fn get_latest_ledger_info_option(&self) -> anyhow::Result<Option<LedgerInfoWithSignatures>>;
+            fn get_last_version_before_timestamp(
+                &self,
+                _timestamp: u64,
+                _ledger_version: Version,
+            ) -> Result<Version>;
 
-        fn get_latest_ledger_info(&self) -> anyhow::Result<LedgerInfoWithSignatures>;
+            fn get_latest_ledger_info_option(&self) -> Result<Option<LedgerInfoWithSignatures>>;
 
-        fn get_latest_version(&self) -> anyhow::Result<Version>;
+            fn get_latest_ledger_info(&self) -> Result<LedgerInfoWithSignatures>;
 
-        fn get_latest_commit_metadata(&self) -> anyhow::Result<(Version, u64)>;
+            fn get_synced_version(&self) -> Result<Option<Version>>;
 
-        fn get_account_transaction(
-            &self,
-            address: AccountAddress,
-            seq_num: u64,
-            include_events: bool,
-            ledger_version: Version,
-        ) -> anyhow::Result<Option<TransactionWithProof>>;
+            fn get_latest_ledger_info_version(&self) -> Result<Version>;
 
-        fn get_account_transactions(
-            &self,
-            address: AccountAddress,
-            seq_num: u64,
-            limit: u64,
-            include_events: bool,
-            ledger_version: Version,
-        ) -> anyhow::Result<AccountTransactionsWithProof>;
+            fn get_latest_commit_metadata(&self) -> Result<(Version, u64)>;
 
-        fn get_state_proof_with_ledger_info(
-            &self,
-            known_version: u64,
-            ledger_info: LedgerInfoWithSignatures,
-        ) -> anyhow::Result<StateProof>;
+            fn get_account_transaction(
+                &self,
+                address: AccountAddress,
+                seq_num: u64,
+                include_events: bool,
+                ledger_version: Version,
+            ) -> Result<Option<TransactionWithProof>>;
 
-        fn get_state_proof(&self, known_version: u64) -> anyhow::Result<StateProof>;
+            fn get_account_transactions(
+                &self,
+                address: AccountAddress,
+                seq_num: u64,
+                limit: u64,
+                include_events: bool,
+                ledger_version: Version,
+            ) -> Result<AccountTransactionsWithProof>;
 
-        fn get_state_value_with_proof_by_version(
-            &self,
-            state_key: &StateKey,
-            version: Version,
-        ) -> anyhow::Result<(Option<StateValue>, SparseMerkleProof)>;
+            fn get_state_proof_with_ledger_info(
+                &self,
+                known_version: u64,
+                ledger_info: LedgerInfoWithSignatures,
+            ) -> Result<StateProof>;
 
-        fn get_latest_executed_trees(&self) -> anyhow::Result<ExecutedTrees>;
+            fn get_state_proof(&self, known_version: u64) -> Result<StateProof>;
 
-        fn get_epoch_ending_ledger_info(&self, known_version: u64) -> anyhow::Result<LedgerInfoWithSignatures>;
+            fn get_state_value_with_proof_by_version(
+                &self,
+                state_key: &StateKey,
+                version: Version,
+            ) -> Result<(Option<StateValue>, SparseMerkleProof)>;
 
-        fn get_accumulator_root_hash(&self, _version: Version) -> anyhow::Result<HashValue>;
+            fn get_latest_executed_trees(&self) -> Result<ExecutedTrees>;
 
-        fn get_accumulator_consistency_proof(
-            &self,
-            _client_known_version: Option<Version>,
-            _ledger_version: Version,
-        ) -> anyhow::Result<AccumulatorConsistencyProof>;
+            fn get_epoch_ending_ledger_info(&self, known_version: u64) -> Result<LedgerInfoWithSignatures>;
 
-        fn get_accumulator_summary(
-            &self,
-            ledger_version: Version,
-        ) -> anyhow::Result<TransactionAccumulatorSummary>;
+            fn get_accumulator_root_hash(&self, _version: Version) -> Result<HashValue>;
 
-        fn get_state_leaf_count(&self, version: Version) -> anyhow::Result<usize>;
+            fn get_accumulator_consistency_proof(
+                &self,
+                _client_known_version: Option<Version>,
+                _ledger_version: Version,
+            ) -> Result<AccumulatorConsistencyProof>;
 
-        fn get_state_value_chunk_with_proof(
-            &self,
-            version: Version,
-            start_idx: usize,
-            chunk_size: usize,
-        ) -> anyhow::Result<StateValueChunkWithProof>;
+            fn get_accumulator_summary(
+                &self,
+                ledger_version: Version,
+            ) -> Result<TransactionAccumulatorSummary>;
 
-        fn get_epoch_snapshot_prune_window(&self) -> anyhow::Result<usize>;
+            fn get_state_item_count(&self, version: Version) -> Result<usize>;
+
+            fn get_state_value_chunk_with_proof(
+                &self,
+                version: Version,
+                start_idx: usize,
+                chunk_size: usize,
+            ) -> Result<StateValueChunkWithProof>;
+
+            fn get_epoch_snapshot_prune_window(&self) -> Result<usize>;
+        }
     }
 }
