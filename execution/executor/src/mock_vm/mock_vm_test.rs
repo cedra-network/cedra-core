@@ -12,6 +12,7 @@ use aptos_types::{
         Result, TStateView,
     },
     transaction::signature_verified_transaction::into_signature_verified_block,
+    txn_provider::default::DefaultTxnProvider,
     write_set::WriteOp,
 };
 use aptos_vm::VMExecutor;

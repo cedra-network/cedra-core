@@ -18,7 +18,7 @@ use crate::{
 };
 use aptos_types::{
     block_executor::config::BlockExecutorConfig, contract_event::TransactionEvent,
-    executable::ExecutableTestType,
+    executable::ExecutableTestType, txn_provider::default::DefaultTxnProvider,
 };
 use claims::{assert_matches, assert_ok};
 use num_cpus;

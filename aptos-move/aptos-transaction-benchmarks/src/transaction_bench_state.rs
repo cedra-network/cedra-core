@@ -30,6 +30,7 @@ use aptos_types::{
         },
         ExecutionStatus, Transaction, TransactionOutput, TransactionStatus,
     },
+    txn_provider::{default::DefaultTxnProvider, TxnProvider},
     vm_status::VMStatus,
 };
 use aptos_vm::{

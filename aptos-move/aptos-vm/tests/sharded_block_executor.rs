@@ -201,6 +201,7 @@ mod test_utils {
             signature_verified_transaction::SignatureVerifiedTransaction, Transaction,
             TransactionOutput,
         },
+        txn_provider::default::DefaultTxnProvider,
     };
     use aptos_vm::{
         sharded_block_executor::{executor_client::ExecutorClient, ShardedBlockExecutor},

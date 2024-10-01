@@ -28,6 +28,7 @@ use aptos_types::{
         TransactionArgument, TransactionAuxiliaryData, TransactionOutput, TransactionPayload,
         TransactionStatus, WriteSetPayload,
     },
+    txn_provider::{default::DefaultTxnProvider, TxnProvider},
     vm_status::{StatusCode, VMStatus},
     write_set::{WriteOp, WriteSet, WriteSetMut},
 };

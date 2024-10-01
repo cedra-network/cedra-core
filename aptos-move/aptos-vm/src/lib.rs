@@ -136,6 +136,7 @@ use aptos_types::{
         signature_verified_transaction::SignatureVerifiedTransaction, BlockOutput,
         SignedTransaction, TransactionOutput, VMValidatorResult,
     },
+    txn_provider::default::DefaultTxnProvider,
     vm_status::VMStatus,
 };
 use std::{marker::Sync, sync::Arc};

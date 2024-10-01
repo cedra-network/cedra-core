@@ -28,6 +28,7 @@ use aptos_types::{
         signature_verified_transaction::SignatureVerifiedTransaction, BlockOutput,
         TransactionOutput, TransactionStatus,
     },
+    txn_provider::TxnProvider,
     write_set::WriteOp,
 };
 use aptos_vm_logging::{flush_speculative_logs, init_speculative_logs};

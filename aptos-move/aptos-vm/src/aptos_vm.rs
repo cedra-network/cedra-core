@@ -68,6 +68,7 @@ use aptos_types::{
         TransactionAuxiliaryData, TransactionOutput, TransactionPayload, TransactionStatus,
         VMValidatorResult, ViewFunctionOutput, WriteSetPayload,
     },
+    txn_provider::{default::DefaultTxnProvider, TxnProvider},
     vm_status::{AbortLocation, StatusCode, VMStatus},
 };
 use aptos_utils::aptos_try;

@@ -26,6 +26,7 @@ use aptos_types::{
         EntryFunction as TransactionEntryFunction, ExecutionStatus, RawTransaction,
         Script as TransactionScript, Transaction, TransactionOutput, TransactionStatus,
     },
+    txn_provider::default::DefaultTxnProvider,
     vm::configs::set_paranoid_type_checks,
     AptosCoinType,
 };

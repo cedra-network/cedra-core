@@ -19,6 +19,7 @@ use aptos_types::{
         SignedTransaction, Transaction, TransactionInfo, TransactionOutput, TransactionPayload,
         Version,
     },
+    txn_provider::{default::DefaultTxnProvider, TxnProvider},
     vm_status::VMStatus,
 };
 use aptos_validator_interface::{

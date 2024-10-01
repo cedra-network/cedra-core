@@ -15,6 +15,7 @@ use aptos_types::{
         signature_verified_transaction::SignatureVerifiedTransaction, Transaction,
         TransactionOutput, Version,
     },
+    txn_provider::default::DefaultTxnProvider,
     write_set::TOTAL_SUPPLY_STATE_KEY,
 };
 use aptos_validator_interface::{AptosValidatorInterface, FilterCondition, RestDebuggerInterface};

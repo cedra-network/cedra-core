@@ -34,6 +34,7 @@ use aptos_types::{
         BlockOutput, ExecutionStatus, Transaction, TransactionOutput, TransactionOutputProvider,
         TransactionStatus,
     },
+    txn_provider::default::DefaultTxnProvider,
 };
 use aptos_vm::{AptosVM, VMExecutor};
 use fail::fail_point;

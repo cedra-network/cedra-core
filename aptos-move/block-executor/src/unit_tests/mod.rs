@@ -29,6 +29,7 @@ use aptos_types::{
     contract_event::TransactionEvent,
     executable::{ExecutableTestType, ModulePath},
     state_store::state_value::StateValueMetadata,
+    txn_provider::default::DefaultTxnProvider,
 };
 use claims::assert_matches;
 use fail::FailScenario;

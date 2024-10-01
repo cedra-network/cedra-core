@@ -29,6 +29,7 @@ use aptos_types::{
         },
         BlockOutput, Transaction, TransactionOutput, TransactionToCommit, Version,
     },
+    txn_provider::default::DefaultTxnProvider,
     vm_status::VMStatus,
 };
 use aptos_vm::{

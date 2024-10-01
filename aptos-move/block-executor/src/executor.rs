@@ -42,6 +42,7 @@ use aptos_types::{
     transaction::{
         block_epilogue::BlockEndInfo, BlockExecutableTransaction as Transaction, BlockOutput,
     },
+    txn_provider::TxnProvider,
     write_set::{TransactionWrite, WriteOp},
 };
 use aptos_vm_logging::{alert, clear_speculative_txn_logs, init_speculative_logs, prelude::*};

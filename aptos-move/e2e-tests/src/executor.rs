@@ -45,6 +45,7 @@ use aptos_types::{
         BlockOutput, ExecutionStatus, SignedTransaction, Transaction, TransactionOutput,
         TransactionPayload, TransactionStatus, VMValidatorResult, ViewFunctionOutput,
     },
+    txn_provider::default::DefaultTxnProvider,
     vm_status::VMStatus,
     write_set::{WriteOp, WriteSet, WriteSetMut},
     AptosCoinType, CoinType,

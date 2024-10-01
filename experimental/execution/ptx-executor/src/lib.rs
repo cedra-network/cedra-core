@@ -39,6 +39,7 @@ use aptos_types::{
         signature_verified_transaction::SignatureVerifiedTransaction, BlockOutput,
         TransactionOutput,
     },
+    txn_provider::{default::DefaultTxnProvider, TxnProvider},
 };
 use aptos_vm::{
     sharded_block_executor::{executor_client::ExecutorClient, ShardedBlockExecutor},
