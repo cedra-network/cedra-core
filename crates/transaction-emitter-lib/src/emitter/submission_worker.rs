@@ -9,11 +9,12 @@ use crate::{
     EmitModeParams,
 };
 use aptos_logger::{debug, error, info, sample, sample::SampleRate, warn};
-use aptos_rest_client::Client as RestClient;
+use aptos_rest_client::{error::RestError, Client as RestClient};
 use aptos_sdk::{
     move_types::account_address::AccountAddress,
     types::{transaction::SignedTransaction, vm_status::StatusCode, LocalAccount},
 };
+use aptos_types::transaction::TransactionPayload;
 use aptos_transaction_generator_lib::TransactionGenerator;
 use core::{
     cmp::{max, min},
@@ -25,10 +26,7 @@ use futures::future::join_all;
 use itertools::Itertools;
 use rand::seq::IteratorRandom;
 use std::{
-    borrow::Borrow,
-    collections::HashMap,
-    sync::{atomic::AtomicU64, Arc},
-    time::Instant,
+    borrow::Borrow, collections::HashMap, f32::consts::E, sync::{atomic::AtomicU64, Arc}, time::Instant
 };
 use tokio::time::sleep;
 
@@ -87,7 +85,7 @@ impl SubmissionWorker {
             self.sleep_check_done(wait_until - now).await;
         }
         let wait_duration = Duration::from_millis(self.params.wait_millis);
-
+        info!("wait_duration: {:?}", wait_duration);
         while !self.stop.load(Ordering::Relaxed) {
             let stats_clone = self.stats.clone();
             let loop_stats = stats_clone.get_cur();
@@ -109,6 +107,7 @@ impl SubmissionWorker {
             wait_until += wait_duration;
 
             let requests = self.gen_requests();
+            info!("account: {:?}, Request count: {:?}", self.accounts.first().unwrap().address(), requests.len());
             if !requests.is_empty() {
                 let mut account_to_start_and_end_seq_num = HashMap::new();
                 for req in requests.iter() {
@@ -125,6 +124,7 @@ impl SubmissionWorker {
                         })
                         .or_insert((cur, cur + 1));
                 }
+                info!("account: {:?}, account_to_start_and_end_seq_num: {:?}", self.accounts.first().unwrap().address(), account_to_start_and_end_seq_num);
                 // Some transaction generators use burner accounts, and will have different
                 // number of accounts per transaction, so useful to very rarely log.
                 sample!(
@@ -208,6 +208,7 @@ impl SubmissionWorker {
                 self.sleep_check_done(wait_until - now).await;
             }
         }
+        info!("account: {:?}, stop: {:?}, SubmissionWorker run done", self.accounts.first().unwrap().address(), self.stop.load(Ordering::Relaxed));
 
         self.accounts
             .into_iter()
@@ -246,6 +247,8 @@ impl SubmissionWorker {
         check_account_sleep_duration: Duration,
         loop_stats: &StatsAccumulator,
     ) {
+        info!("wait_and_update_stats for account: {:?}, start_time: {:?} avg_txn_offset_time: {:?} skip_latency_stats {:?}, check_account_sleep_duration {:?}, txn_expiration_ts_secs {:?}, main_client_index {:?}, client url {:?}", self.accounts.first().unwrap().address(), start_time, avg_txn_offset_time, skip_latency_stats, check_account_sleep_duration, txn_expiration_ts_secs, self.main_client_index, self.client().path_prefix_string());
+        let now = Instant::now();
         let (latest_fetched_counts, sum_of_completion_timestamps_millis) =
             wait_for_accounts_sequence(
                 start_time,
@@ -256,6 +259,8 @@ impl SubmissionWorker {
             )
             .await;
 
+        self.txn_generator.update_sequence_numbers(&latest_fetched_counts);
+
         for account in self.accounts.iter_mut() {
             update_account_seq_num(
                 Arc::get_mut(account).unwrap(),
@@ -265,6 +270,7 @@ impl SubmissionWorker {
         }
         let (num_committed, num_expired) =
             count_committed_expired_stats(account_to_start_and_end_seq_num, latest_fetched_counts);
+        info!("account: {:?}, num_committed: {:?}, num_expired: {:?}", self.accounts.first().unwrap().address(), num_committed, num_expired);
 
         if num_expired > 0 {
             loop_stats
@@ -304,6 +310,7 @@ impl SubmissionWorker {
                     .record_data_point(avg_latency, num_committed as u64);
             }
         }
+        info!("{:?} waited for accounts to reach sequence number for {:?} ms", self.accounts.first().unwrap().address(), now.elapsed().as_millis());
     }
 
     fn gen_requests(&mut self) -> Vec<SignedTransaction> {
@@ -426,18 +433,49 @@ pub async fn submit_transactions(
             stats
                 .failed_submission
                 .fetch_add(txns.len() as u64, Ordering::Relaxed);
-            sample!(
-                SampleRate::Duration(Duration::from_secs(60)),
+            // sample!(
+            //     SampleRate::Duration(Duration::from_secs(60)),
+                // let mut balances = Vec::new();
+                // for txn in txns.iter() {
+                //     let balance = client.view_apt_account_balance(txn.sender()).await.map_or(-1, |v| v.into_inner() as i64);
+                //     balances.push(balance);
+                // }
+                
                 warn!(
-                    "[{:?}] Failed to submit batch request: {:?}",
+                    "Unknown: [{:?}] Failed to submit batch request. failed_submissions = {:?}, payloads = {:?}, senders = {:?}, sequence_numbers = {:?}, error = {:?}",
                     client.path_prefix_string(),
+                    txns.len(),
+                    txns.iter().flat_map(|t| match t.raw_transaction_ref().payload() {
+                        TransactionPayload::EntryFunction(entry_function) => {
+                            Some((entry_function.module(), entry_function.function()))
+                        },
+                        _ => None,
+                    }).collect::<Vec<_>>(),
+                    txns.iter().map(|t| t.sender()).collect::<Vec<_>>(),
+                    txns.iter().map(|t| t.sequence_number()).collect::<Vec<_>>(),
+                    // balances,
                     e
-                )
-            );
+                );
+            // );
         },
         Ok(v) => {
             let failures = v.into_inner().transaction_failures;
-
+            // let mut balances = Vec::new();
+            // for txn in txns.iter() {
+            //     let balance = client.view_apt_account_balance(txn.sender()).await.map_or(-1, |v| v.into_inner() as i64);
+            //     balances.push(balance);
+            // }
+                
+            info!("Submission to {:?} succeeded. Successes: {:?} Failures: {:?}. Entry functions: {:?}. Senders: {:?}, Sequence numbers: {:?}", client.path_prefix_string(), txns.len(), failures.len(), txns.iter().flat_map(|t| match t.raw_transaction_ref().payload() {
+                TransactionPayload::EntryFunction(entry_function) => {
+                    Some((entry_function.module(), entry_function.function()))
+                },
+                _ => None,
+            }).collect::<Vec<_>>(),
+            txns.iter().map(|t| t.sender()).collect::<Vec<_>>(),
+            txns.iter().map(|t| t.sequence_number()).collect::<Vec<_>>(),
+            //balances,
+        );
             stats
                 .failed_submission
                 .fetch_add(failures.len() as u64, Ordering::Relaxed);

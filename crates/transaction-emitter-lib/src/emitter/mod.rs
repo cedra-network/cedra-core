@@ -21,7 +21,7 @@ use anyhow::{ensure, format_err, Result};
 use aptos_config::config::DEFAULT_MAX_SUBMIT_TRANSACTION_BATCH_SIZE;
 use aptos_crypto::ed25519::Ed25519PrivateKey;
 use aptos_logger::{error, info, sample, sample::SampleRate, warn};
-use aptos_rest_client::{aptos_api_types::AptosErrorCode, error::RestError, Client as RestClient};
+use aptos_rest_client::{aptos_api_types::AptosErrorCode, error::RestError, Client as RestClient, Response};
 use aptos_sdk::{
     move_types::account_address::AccountAddress,
     transaction_builder::{aptos_stdlib, TransactionFactory},
@@ -143,8 +143,11 @@ impl NumAccountsMode {
             (None, Some(transactions_per_account)) => {
                 Self::TransactionsPerAccount(transactions_per_account)
             },
+            (None, None) => panic!(
+                "Either num_accounts or transactions_per_account should be set"
+            ),
             _ => panic!(
-                "Either num_accounts or transactions_per_account should be set, but not both"
+                "Both num_accounts or transactions_per_account should not be set"
             ),
         }
     }
@@ -230,7 +233,7 @@ impl Default for EmitJobRequest {
             latency_polling_interval: Duration::from_millis(300),
             tps_wait_after_expiration_secs: None,
             account_minter_seed: None,
-            coins_per_account_override: None,
+            coins_per_account_override: Some(1000_0000_0000),
             account_type: AccountType::Local,
             keyless_ephem_secret_key: None,
             proof_file_path: None,
@@ -653,6 +656,7 @@ impl EmitJob {
 
         assert!(self.phase_starts.len() == cur_phase);
         self.phase_starts.push(Instant::now());
+        info!("Starting next phase. Phase: {}", cur_phase);
     }
 
     pub fn get_cur_phase(&self) -> usize {
@@ -751,6 +755,9 @@ impl TxnEmitter {
             num_accounts, num_accounts
         );
 
+        info!("Beginning: Balance with root account :{:?}", get_account_balance(req.rest_clients.first().unwrap(), root_account.address()).await);
+        info!("Beginning: Root account address and seq number: {:?}", get_account_address_and_seq_num(req.rest_clients.first().unwrap(), root_account.address()).await);
+
         let txn_factory = self
             .txn_factory
             .clone()
@@ -818,6 +825,10 @@ impl TxnEmitter {
             mint_to_root: req.mint_to_root,
             prompt_before_spending: req.prompt_before_spending,
         };
+
+        info!("After account creation: Balance with root account :{:?}", get_account_balance(req.rest_clients.first().unwrap(), root_account.address()).await);
+        info!("After account creation: Root account address and seq number: {:?}", get_account_address_and_seq_num(req.rest_clients.first().unwrap(), root_account.address()).await);
+
         let (txn_generator_creator, _, _) = create_txn_generator_creator(
             &req.transaction_mix_per_phase,
             source_account_manager,
@@ -829,6 +840,9 @@ impl TxnEmitter {
             stats.get_cur_phase_obj(),
         )
         .await;
+
+        info!("After generator: Balance with root account :{:?}", get_account_balance(req.rest_clients.first().unwrap(), root_account.address()).await);
+        info!("After generator: Root account address and seq number: {:?}", get_account_address_and_seq_num(req.rest_clients.first().unwrap(), root_account.address()).await);
 
         if !req.coordination_delay_between_instances.is_zero() {
             info!(
@@ -924,8 +938,8 @@ impl TxnEmitter {
         let per_phase_duration = duration.checked_div(phases as u32).unwrap();
         for phase in 0..phases {
             if phase > 0 {
-                info!("Starting next phase");
                 job.start_next_phase();
+                info!("Starting next phase. cur phase {}. total phases {}. per phase duration {:?}", job.get_cur_phase(), phases, per_phase_duration);
             }
             if let Some(interval_secs) = print_stats_interval {
                 job.periodic_stat(per_phase_duration, interval_secs).await;
@@ -945,6 +959,7 @@ impl TxnEmitter {
         emit_job_request: EmitJobRequest,
         duration: Duration,
     ) -> Result<TxnStats> {
+        info!("emit_txn_for");
         self.emit_txn_for_impl(source_account, emit_job_request, duration, None)
             .await
     }
@@ -956,6 +971,7 @@ impl TxnEmitter {
         duration: Duration,
         interval_secs: u64,
     ) -> Result<TxnStats> {
+        info!("emit_txn_for_with_stats");
         self.emit_txn_for_impl(
             source_account,
             emit_job_request,
@@ -1133,6 +1149,19 @@ pub async fn get_account_seq_num(
             result?;
             unreachable!()
         },
+    }
+}
+
+pub async fn get_account_balance(
+    client: &RestClient,
+    address: AccountAddress,
+) -> Result<Response<u64>> {
+    match client.view_apt_account_balance(address).await {
+        Ok(resp) => Ok(resp),
+        Err(e) => {
+            error!("Failed to get balance for account {}: {:?}", address, e);
+            Err(e.into())
+        }
     }
 }
 

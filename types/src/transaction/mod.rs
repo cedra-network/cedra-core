@@ -351,6 +351,10 @@ impl RawTransaction {
         self.payload
     }
 
+    pub fn payload(&self) -> &TransactionPayload {
+        &self.payload
+    }
+
     /// Return the sender of this transaction.
     pub fn sender(&self) -> AccountAddress {
         self.sender
@@ -523,7 +527,7 @@ impl Debug for SignedTransaction {
         write!(
             f,
             "SignedTransaction {{ \n \
-             {{ raw_txn: {:#?}, \n \
+             {{ raw_txn: {:?}, \n \
              authenticator: {:#?}, \n \
              }} \n \
              }}",

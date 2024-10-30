@@ -23,6 +23,7 @@ use std::{
         Arc,
     },
     time::Duration,
+    hash::Hash,
 };
 
 mod account_generator;
@@ -35,8 +36,10 @@ mod entry_points;
 mod p2p_transaction_generator;
 pub mod publish_modules;
 pub mod publishing;
+mod stable_coin_minter;
 mod transaction_mix_generator;
 mod workflow_delegator;
+
 use self::{
     account_generator::AccountGeneratorCreator,
     call_custom_modules::CustomModulesDelegationGeneratorCreator,
@@ -95,7 +98,18 @@ pub enum AccountType {
 
 #[derive(Debug, Copy, Clone)]
 pub enum WorkflowKind {
-    CreateMintBurn { count: usize, creation_balance: u64 },
+    CreateMintBurn {
+        count: usize,
+        creation_balance: u64,
+    },
+    StableCoinMint {
+        num_minter_accounts: usize,
+        num_user_accounts: usize,
+        // If batch_size = 1, then mint function is called
+        // If batch_size > 1, then batch_mint function is called
+        batch_size: usize,
+        num_mint_transactions: usize,
+    },
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -107,14 +121,14 @@ pub enum WorkflowProgress {
 impl WorkflowProgress {
     pub fn when_done_default() -> Self {
         Self::WhenDone {
-            delay_between_stages_s: 10,
+            delay_between_stages_s: 60,
         }
     }
 }
 
 impl Default for TransactionType {
     fn default() -> Self {
-        TransactionTypeArg::CoinTransfer.materialize_default()
+        TransactionTypeArg::StableCoinBatchMint1AccountBatch2.materialize_default()
     }
 }
 
@@ -124,6 +138,10 @@ pub trait TransactionGenerator: Sync + Send {
         account: &LocalAccount,
         num_to_create: usize,
     ) -> Vec<SignedTransaction>;
+
+    fn update_sequence_numbers(&mut self, _latest_fetched_sequence_numbers: &HashMap<AccountAddress, u64>) {
+        // Default implementation does nothing
+    }
 }
 
 #[async_trait]
@@ -356,7 +374,7 @@ pub async fn create_txn_generator_creator(
                 },
                 TransactionType::Workflow {
                     num_modules,
-                    use_account_pool,
+                    use_account_pool: _,
                     workflow_kind,
                     progress_type,
                 } => Box::new(
@@ -367,7 +385,11 @@ pub async fn create_txn_generator_creator(
                         &root_account,
                         txn_executor,
                         *num_modules,
-                        use_account_pool.then(|| accounts_pool.clone()),
+                        Some(Arc::new(source_accounts
+                            .iter()
+                            .map(|d| d.address())
+                            .collect()
+                        )),
                         cur_phase.clone(),
                         *progress_type,
                     )
@@ -387,6 +409,107 @@ pub async fn create_txn_generator_creator(
         addresses_pool,
         accounts_pool,
     )
+}
+
+pub struct BucketedAccountPool<Bucket> {
+    pool: RwLock<HashMap<Bucket, Vec<LocalAccount>>>,
+    all_buckets: Arc<Vec<Bucket>>,
+    current_index: AtomicUsize,
+    object_to_bucket_map: RwLock<HashMap<AccountAddress, Bucket>>,
+}
+
+impl<Bucket: Clone + Eq + PartialEq + Hash> BucketedAccountPool<Bucket> {
+    pub(crate) fn new(buckets: Arc<Vec<Bucket>>) -> Self {
+        let mut pool = HashMap::new();
+        for bucket in buckets.iter() {
+            pool.insert(bucket.clone(), Vec::new());
+        }
+        Self {
+            pool: RwLock::new(pool),
+            all_buckets: buckets,
+            current_index: AtomicUsize::new(0),
+            object_to_bucket_map: RwLock::new(HashMap::new()),
+        }
+    }
+
+    pub(crate) fn add_to_bucket(&self, bucket: Bucket, mut addition: Vec<LocalAccount>) {
+        assert!(!addition.is_empty());
+        let mut current = self.pool.write();
+        let mut object_to_bucket_map = self.object_to_bucket_map.write();
+        object_to_bucket_map.extend(addition.iter().map(|object| (object.address(), bucket.clone())));
+        current
+            .entry(bucket)
+            .or_insert_with(Vec::new)
+            .append(&mut addition);
+    }
+
+
+    pub(crate) fn add_to_pool(&self, addition: Vec<LocalAccount>) {
+        assert!(!addition.is_empty());
+        let mut current = self.pool.write();
+        let mut object_to_bucket_map = self.object_to_bucket_map.write();
+        for object in addition {
+            let current_index = self.current_index.load(Ordering::Relaxed);
+            let current_bucket = self.all_buckets[current_index].clone();
+            let object_address = object.address();
+            current
+                .entry(current_bucket.clone())
+                .or_insert_with(Vec::new)
+                .append(&mut vec![object]);
+            self.current_index.store((current_index + 1) % self.all_buckets.len(), Ordering::Relaxed);
+            object_to_bucket_map.insert(object_address, current_bucket);
+        }
+    }
+
+    pub(crate) fn take_from_pool(
+        &self,
+        bucket: Bucket,
+        needed: usize,
+        return_partial: bool,
+        rng: &mut StdRng,
+    ) -> Vec<LocalAccount> {
+        let mut current = self.pool.write();
+        let num_in_pool = current.get_mut(&bucket).map_or(0, |v| v.len());
+        if !return_partial && num_in_pool < needed {
+            sample!(
+                SampleRate::Duration(Duration::from_secs(10)),
+                warn!("Cannot fetch enough from shared pool, left in pool {}, needed {}", num_in_pool, needed);
+            );
+            return Vec::new();
+        }
+        let num_to_return = std::cmp::min(num_in_pool, needed);
+        let current_bucket = current.get_mut(&bucket).unwrap();
+        let mut result = current_bucket
+            .drain((num_in_pool - num_to_return)..)
+            .collect::<Vec<_>>();
+
+        if current_bucket.len() > num_to_return {
+            let start = rng.gen_range(0, current_bucket.len() - num_to_return);
+            current_bucket[start..start + num_to_return].swap_with_slice(&mut result);
+        }
+        result
+    }
+
+    pub(crate) fn update_sequence_number(
+        &self,
+        object_address: &AccountAddress,
+        sequence_number: u64,
+    ) {
+        info!("Called update sequence number for {} {}", object_address, sequence_number);
+        let mut current = self.pool.write();
+        if let Some(bucket) = self.object_to_bucket_map.read().get(object_address).and_then(|bucket| current.get_mut(bucket)) {
+            for object in bucket.iter_mut() {
+                if object.address() == *object_address {
+                    if sequence_number < object.sequence_number() {
+                        info!("Sequence number for {} decreased from {} to {}", object_address, object.sequence_number(), sequence_number);
+                        object.set_sequence_number(sequence_number);
+                    } else {
+                        info!("Sequence number for {} not updated", object_address);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Simple object pool structure, that you can add and remove from multiple threads.
@@ -431,7 +554,7 @@ impl<T> ObjectPool<T> {
         rng: &mut StdRng,
     ) {
         assert!(!addition.is_empty());
-        assert!(addition.len() <= max_size);
+        // assert!(addition.len() <= max_size);
 
         let mut current = self.pool.write();
         if current.len() < max_size {

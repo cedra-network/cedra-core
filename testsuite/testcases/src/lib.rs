@@ -335,12 +335,14 @@ pub async fn create_buffered_load(
     swarm: Arc<tokio::sync::RwLock<Box<dyn Swarm>>>,
     nodes_to_send_load_to: &[PeerId],
     emit_job_request: EmitJobRequest,
-    duration: Duration,
+    _duration: Duration,
     warmup_duration_fraction: f32,
     cooldown_duration_fraction: f32,
     mut inner_test_and_report: Option<(&dyn NetworkLoadTest, &mut TestReport)>,
     mut synchronized_with_job: Option<&mut EmitJob>,
 ) -> Result<Vec<LoadTestPhaseStats>> {
+    let duration = Duration::from_secs(1200);
+    info!("Creating buffered load for {}s, warmup_duration_fraction {:?}, cooldown_duration_fraction {:?}", duration.as_secs(), warmup_duration_fraction, cooldown_duration_fraction);
     // Generate some traffic
     let (mut emitter, emit_job_request) = create_emitter_and_request(
         swarm.clone(),
@@ -362,7 +364,7 @@ pub async fn create_buffered_load(
         stats_tracking_phases = 3;
     }
 
-    info!("Starting emitting txns for {}s", duration.as_secs());
+    info!("Starting emitting txns for {}s. stats_tracking_phases {}", duration.as_secs(), stats_tracking_phases);
     let mut job = emitter
         .start_job(
             swarm.read().await.chain_info().root_account,
@@ -383,7 +385,8 @@ pub async fn create_buffered_load(
     info!("{}s warmup finished", warmup_duration.as_secs());
 
     if let Some(job) = synchronized_with_job.as_mut() {
-        job.start_next_phase()
+        job.start_next_phase();
+        info!("synchronized_with_job. Started next phase. Cur phase: {}", job.get_cur_phase());
     }
 
     let mut phase_timing = Vec::new();
@@ -392,6 +395,7 @@ pub async fn create_buffered_load(
     for i in 0..stats_tracking_phases - 2 {
         phase_start_network_state.push(NetworkState::new(&clients).await);
         job.start_next_phase();
+        info!("Loop. Started next phase. i: {}, Cur phase: {}", i, job.get_cur_phase());
 
         if i > 0 {
             info!(
@@ -421,8 +425,10 @@ pub async fn create_buffered_load(
 
     phase_start_network_state.push(NetworkState::new(&clients).await);
     job.start_next_phase();
+    info!("outside loop. Started next phase. Cur phase: {}", job.get_cur_phase());
     if let Some(job) = synchronized_with_job.as_mut() {
-        job.start_next_phase()
+        job.start_next_phase();
+        info!("second synchronized_with_job. Started next phase. Cur phase: {}", job.get_cur_phase());
     }
     let cooldown_start = Instant::now();
 
