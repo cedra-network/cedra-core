@@ -1604,6 +1604,11 @@ impl Frame {
         instruction: &Bytecode,
     ) -> PartialVMResult<()> {
         match instruction {
+            // TODO: implement closures
+            Bytecode::ClosPack(..) | Bytecode::ClosPackGeneric(..) | Bytecode::ClosEval(..) => {
+                return Err(PartialVMError::new(StatusCode::UNIMPLEMENTED_FEATURE)
+                    .with_message("closure opcodes in interpreter".to_owned()))
+            },
             // Call instruction will be checked at execute_main.
             Bytecode::Call(_) | Bytecode::CallGeneric(_) => (),
             Bytecode::BrFalse(_) | Bytecode::BrTrue(_) => {
@@ -1729,6 +1734,12 @@ impl Frame {
         let ty_builder = resolver.loader().ty_builder();
 
         match instruction {
+            // TODO: implement closures
+            Bytecode::ClosPack(..) | Bytecode::ClosPackGeneric(..) | Bytecode::ClosEval(..) => {
+                return Err(PartialVMError::new(StatusCode::UNIMPLEMENTED_FEATURE)
+                    .with_message("closure opcodes in interpreter".to_owned()))
+            },
+
             Bytecode::BrTrue(_) | Bytecode::BrFalse(_) => (),
             Bytecode::Branch(_)
             | Bytecode::Ret
@@ -2325,6 +2336,14 @@ impl Frame {
                 }
 
                 match instruction {
+                    // TODO: implement closures
+                    Bytecode::ClosPack(..)
+                    | Bytecode::ClosPackGeneric(..)
+                    | Bytecode::ClosEval(..) => {
+                        return Err(PartialVMError::new(StatusCode::UNIMPLEMENTED_FEATURE)
+                            .with_message("closure opcodes in interpreter".to_owned()))
+                    },
+
                     Bytecode::Pop => {
                         let popped_val = interpreter.operand_stack.pop()?;
                         gas_meter.charge_pop(popped_val)?;

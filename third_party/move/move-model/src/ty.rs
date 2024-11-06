@@ -1375,6 +1375,10 @@ impl Type {
                         .collect(),
                 )
             },
+            SignatureToken::Function(..) => {
+                // TODO: implement function conversion
+                unimplemented!("signature token to model type")
+            },
         }
     }
 
