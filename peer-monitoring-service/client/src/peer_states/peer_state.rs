@@ -40,12 +40,22 @@ pub struct PeerState {
 }
 
 impl PeerState {
-    pub fn new(node_config: NodeConfig, time_service: TimeService) -> Self {
+    pub fn new(
+        node_config: NodeConfig,
+        time_service: TimeService,
+        peer_monitoring_service_client: Arc<
+            PeerMonitoringServiceClient<NetworkClient<PeerMonitoringServiceMessage>>,
+        >,
+    ) -> Self {
         // Create a state entry for each peer state key
         let state_entries = Arc::new(RwLock::new(HashMap::new()));
         for peer_state_key in PeerStateKey::get_all_keys() {
-            let peer_state_value =
-                PeerStateValue::new(node_config.clone(), time_service.clone(), &peer_state_key);
+            let peer_state_value = PeerStateValue::new(
+                node_config.clone(),
+                time_service.clone(),
+                &peer_state_key,
+                peer_monitoring_service_client.clone(),
+            );
             state_entries
                 .write()
                 .insert(peer_state_key, Arc::new(RwLock::new(peer_state_value)));
@@ -68,8 +78,8 @@ impl PeerState {
         &self,
         monitoring_service_config: &PeerMonitoringServiceConfig,
         peer_state_key: &PeerStateKey,
-        peer_monitoring_client: PeerMonitoringServiceClient<
-            NetworkClient<PeerMonitoringServiceMessage>,
+        peer_monitoring_client: Arc<
+            PeerMonitoringServiceClient<NetworkClient<PeerMonitoringServiceMessage>>,
         >,
         peer_network_id: PeerNetworkId,
         peer_metadata: PeerMetadata,

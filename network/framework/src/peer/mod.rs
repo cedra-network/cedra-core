@@ -81,13 +81,33 @@ pub enum PeerRequest {
 pub enum DisconnectReason {
     Requested,
     ConnectionLost,
+    FailedHealthCheckPing(PingDisconnectContext),
+    FailedPeerMonitoringPing(PingDisconnectContext),
+}
+
+/// Ping Disconnect Context
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct PingDisconnectContext {
+    actual_ping_failures: u64,
+    max_ping_failures_tolerated: u64,
+}
+
+impl PingDisconnectContext {
+    pub fn new(actual_ping_failures: u64, max_ping_failures_tolerated: u64) -> Self {
+        Self {
+            actual_ping_failures,
+            max_ping_failures_tolerated,
+        }
+    }
 }
 
 impl fmt::Display for DisconnectReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
-            DisconnectReason::Requested => "Requested",
-            DisconnectReason::ConnectionLost => "ConnectionLost",
+            DisconnectReason::Requested => "Requested".to_string(),
+            DisconnectReason::ConnectionLost => "ConnectionLost".to_string(),
+            DisconnectReason::FailedHealthCheckPing(ping_disconnect_context) => format!("FailedHealthCheckPing: Experienced {} ping failures, which is greater than the maximum ping failures tolerated of {}", ping_disconnect_context.actual_ping_failures, ping_disconnect_context.max_ping_failures_tolerated),
+            DisconnectReason::FailedPeerMonitoringPing(ping_disconnect_context) => format!("FailedPeerMonitoringPing: Experienced {} ping failures, which is greater than the maximum ping failures tolerated of {}", ping_disconnect_context.actual_ping_failures, ping_disconnect_context.max_ping_failures_tolerated),
         };
         write!(f, "{}", s)
     }
