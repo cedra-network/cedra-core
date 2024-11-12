@@ -39,6 +39,7 @@ async fn test_peer_updater_loop_multiple_peers() {
     let all_network_ids = vec![NetworkId::Validator, NetworkId::Vfn, NetworkId::Public];
     let (peer_monitoring_client, mut mock_monitoring_server, peer_monitor_state, time_service) =
         MockMonitoringServer::new(all_network_ids.clone());
+    let peer_monitoring_client = Arc::new(peer_monitoring_client);
 
     // Verify peers and metadata is empty
     let peers_and_metadata = peer_monitoring_client.get_peers_and_metadata();
@@ -58,7 +59,11 @@ async fn test_peer_updater_loop_multiple_peers() {
     let node_config = NodeConfig::default();
     let all_peers = vec![validator_peer, vfn_peer, fullnode_peer];
     for peer in &all_peers {
-        let peer_state = PeerState::new(node_config.clone(), time_service.clone());
+        let peer_state = PeerState::new(
+            node_config.clone(),
+            time_service.clone(),
+            peer_monitoring_client.clone(),
+        );
         peer_monitor_state
             .peer_states
             .write()

@@ -48,7 +48,6 @@ use futures::{
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use tokio::time::timeout;
 
 pub mod builder;
 mod interface;
@@ -226,6 +225,7 @@ impl<NetworkClient: NetworkClientInterface<HealthCheckerMsg> + Unpin> HealthChec
                         }
                     }
                 }
+                // TODO @hariria deprecate
                 _ = ticker.select_next_some() => {
                     self.round += 1;
                     let connected = self.network_interface.connected_peers();
@@ -252,6 +252,7 @@ impl<NetworkClient: NetworkClientInterface<HealthCheckerMsg> + Unpin> HealthChec
                             nonce
                         );
 
+                        // TODO @hariria deprecate
                         tick_handlers.push(Self::ping_peer(
                             self.network_context,
                             self.network_interface.network_client(),
@@ -353,39 +354,20 @@ impl<NetworkClient: NetworkClientInterface<HealthCheckerMsg> + Unpin> HealthChec
                 self.network_interface
                     .increment_peer_round_failure(peer_id, round);
 
-                // If the ping failures are now more than
-                // `self.ping_failures_tolerated`, we disconnect from the node.
-                // The HealthChecker only performs the disconnect. It relies on
-                // ConnectivityManager or the remote peer to re-establish the connection.
+                // The HealthChecker no longer disconnects from the node. That functionality has
+                // moved to the peer monitoring service
                 let failures = self
                     .network_interface
                     .get_peer_failures(peer_id)
                     .unwrap_or(0);
                 if failures > self.ping_failures_tolerated {
+                    // TODO deprecate: this no longer disconnects peers, only responds to pings
                     info!(
                         NetworkSchema::new(&self.network_context).remote_peer(&peer_id),
-                        "{} Disconnecting from peer: {}",
+                        "{} Health check pings are greater than ping failures tolerated from peer: {}",
                         self.network_context,
                         peer_id.short_str()
                     );
-                    let peer_network_id =
-                        PeerNetworkId::new(self.network_context.network_id(), peer_id);
-                    if let Err(err) = timeout(
-                        Duration::from_millis(50),
-                        self.network_interface.disconnect_peer(peer_network_id),
-                    )
-                    .await
-                    {
-                        warn!(
-                            NetworkSchema::new(&self.network_context)
-                                .remote_peer(&peer_id),
-                            error = ?err,
-                            "{} Failed to disconnect from peer: {} with error: {:?}",
-                            self.network_context,
-                            peer_id.short_str(),
-                            err
-                        );
-                    }
                 }
             },
         }
