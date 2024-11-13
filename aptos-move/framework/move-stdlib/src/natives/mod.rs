@@ -8,6 +8,7 @@
 pub mod bcs;
 pub mod cmp;
 pub mod hash;
+pub mod hot_potato_any;
 pub mod signer;
 pub mod string;
 #[cfg(feature = "testing")]
@@ -37,6 +38,7 @@ pub fn all_natives(
         add_natives!("hash", hash::make_all(builder));
         add_natives!("signer", signer::make_all(builder));
         add_natives!("string", string::make_all(builder));
+        add_natives!("hot_potato_any", hot_potato_any::make_all(builder));
         #[cfg(feature = "testing")]
         {
             add_natives!("unit_test", unit_test::make_all(builder));
