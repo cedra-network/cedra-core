@@ -60,7 +60,7 @@ pub struct Coverage {
 impl Coverage {
     pub fn execute(self, path: Option<PathBuf>, config: BuildConfig) -> anyhow::Result<()> {
         let path = reroot_path(path)?;
-        let coverage_map = CoverageMap::from_binary_file(path.join(".coverage_map.mvcov"))?;
+        let coverage_map = CoverageMap::from_binary_file(&path.join(".coverage_map.mvcov"))?;
         let package = config.compile_package(&path, &mut Vec::new())?;
         let modules: Vec<_> = package
             .root_modules()
@@ -79,8 +79,17 @@ impl Coverage {
                     }) => (module, source_map),
                     _ => panic!("Should all be modules"),
                 };
+                let packages: Vec<_> = package
+                    .root_modules()
+                    .map(|unit| match &unit.unit {
+                        CompiledUnit::Module(NamedCompiledModule {
+                            module, source_map, ..
+                        }) => (module, source_map),
+                        _ => panic!("Should all be modules"),
+                    })
+                    .collect();
                 let source_coverage_builder =
-                    SourceCoverageBuilder::new(module, &coverage_map, source_map);
+                    SourceCoverageBuilder::new(module, &coverage_map, source_map, packages);
                 let source_coverage = source_coverage_builder.compute_source_coverage(source_path);
                 source_coverage
                     .output_source_coverage(&mut std::io::stdout(), self.color, self.tag)

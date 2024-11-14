@@ -124,7 +124,17 @@ impl CliCommand<()> for SourceCoverage {
             }) => (module, source_map),
             _ => panic!("Should all be modules"),
         };
-        let source_coverage = SourceCoverageBuilder::new(module, &coverage_map, source_map);
+        let packages: Vec<_> = package
+            .root_modules()
+            .map(|unit| match &unit.unit {
+                CompiledUnit::Module(NamedCompiledModule {
+                    module, source_map, ..
+                }) => (module, source_map),
+                _ => panic!("Should all be modules"),
+            })
+            .collect();
+        let source_coverage =
+            SourceCoverageBuilder::new(module, &coverage_map, source_map, packages);
         let source_coverage = source_coverage.compute_source_coverage(source_path);
         let output_result =
             source_coverage.output_source_coverage(&mut std::io::stdout(), self.color, self.tag);
@@ -184,7 +194,7 @@ fn compile_coverage(
 
     let path = move_options.get_package_path()?;
     let coverage_map =
-        CoverageMap::from_binary_file(path.join(".coverage_map.mvcov")).map_err(|err| {
+        CoverageMap::from_binary_file(&path.join(".coverage_map.mvcov")).map_err(|err| {
             CliError::UnexpectedError(format!("Failed to retrieve coverage map {}", err))
         })?;
     let package = config
