@@ -14,6 +14,7 @@ use crate::{
     symbol::Symbol,
 };
 use itertools::Itertools;
+use log::debug;
 #[allow(deprecated)]
 use move_binary_format::normalized::Type as MType;
 use move_binary_format::{
@@ -36,6 +37,8 @@ use std::{
     iter,
 };
 
+static DEBUG_TRACE: bool = true;
+
 /// Represents a type.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
 pub enum Type {
@@ -44,7 +47,11 @@ pub enum Type {
     Vector(Box<Type>),
     Struct(ModuleId, StructId, /*type-params*/ Vec<Type>),
     TypeParameter(u16),
-    Fun(/*args*/ Box<Type>, /*result*/ Box<Type>),
+    Fun(
+        /* known args */ Box<Type>,
+        /*result*/ Box<Type>,
+        AbilitySet,
+    ),
 
     // Types only appearing in programs.
     Reference(ReferenceKind, Box<Type>),
@@ -968,7 +975,7 @@ impl Type {
         use Type::*;
         match self {
             Primitive(p) => p.is_spec(),
-            Fun(args, result) => args.is_spec() || result.is_spec(),
+            Fun(args, result, _) => args.is_spec() || result.is_spec(),
             TypeDomain(..) | ResourceDomain(..) | Error => true,
             Var(..) | TypeParameter(..) => false,
             Tuple(ts) => ts.iter().any(|t| t.is_spec()),
@@ -1195,9 +1202,10 @@ impl Type {
                 Type::Reference(*kind, Box::new(bt.replace(params, subs, use_constr)))
             },
             Type::Struct(mid, sid, args) => Type::Struct(*mid, *sid, replace_vec(args)),
-            Type::Fun(arg, result) => Type::Fun(
+            Type::Fun(arg, result, abilities) => Type::Fun(
                 Box::new(arg.replace(params, subs, use_constr)),
                 Box::new(result.replace(params, subs, use_constr)),
+                *abilities,
             ),
             Type::Tuple(args) => Type::Tuple(replace_vec(args)),
             Type::Vector(et) => Type::Vector(Box::new(et.replace(params, subs, use_constr))),
@@ -1223,7 +1231,7 @@ impl Type {
             match self {
                 Type::Reference(_, bt) => bt.contains(p),
                 Type::Struct(_, _, args) => contains_vec(args),
-                Type::Fun(arg, result) => arg.contains(p) || result.contains(p),
+                Type::Fun(arg, result, _) => arg.contains(p) || result.contains(p),
                 Type::Tuple(args) => contains_vec(args),
                 Type::Vector(et) => et.contains(p),
                 _ => false,
@@ -1237,7 +1245,7 @@ impl Type {
         match self {
             Var(_) => true,
             Tuple(ts) => ts.iter().any(|t| t.is_incomplete()),
-            Fun(a, r) => a.is_incomplete() || r.is_incomplete(),
+            Fun(a, r, _) => a.is_incomplete() || r.is_incomplete(),
             Struct(_, _, ts) => ts.iter().any(|t| t.is_incomplete()),
             Vector(et) => et.is_incomplete(),
             Reference(_, bt) => bt.is_incomplete(),
@@ -1258,7 +1266,7 @@ impl Type {
         use Type::*;
         match self {
             Tuple(ts) => ts.iter().for_each(|t| t.module_usage(usage)),
-            Fun(a, r) => {
+            Fun(a, r, _) => {
                 a.module_usage(usage);
                 r.module_usage(usage);
             },
@@ -1424,7 +1432,7 @@ impl Type {
                 vars.insert(*id);
             },
             Tuple(ts) => ts.iter().for_each(|t| t.internal_get_vars(vars)),
-            Fun(a, r) => {
+            Fun(a, r, _) => {
                 a.internal_get_vars(vars);
                 r.internal_get_vars(vars);
             },
@@ -1447,7 +1455,7 @@ impl Type {
             Type::Vector(bt) => bt.visit(visitor),
             Type::Struct(_, _, tys) => visit_slice(tys, visitor),
             Type::Reference(_, ty) => ty.visit(visitor),
-            Type::Fun(a, ty) => {
+            Type::Fun(a, ty, _) => {
                 a.visit(visitor);
                 ty.visit(visitor);
             },
@@ -1583,6 +1591,12 @@ pub trait AbilityContext {
         &self,
         qid: QualifiedId<StructId>,
     ) -> (Symbol, Vec<TypeParameter>, AbilitySet);
+
+    /// If available, deliver the type of a type var.
+    fn var_type(&self, vid: u32) -> Option<Type>;
+
+    /// if available, deliver the constraints on a type var.
+    fn var_constraints(&self, vid: u32) -> Option<&Vec<(Loc, WideningOrder, Constraint)>>;
 }
 
 /// A trait to provide context information for unification.
@@ -1672,6 +1686,16 @@ impl AbilityContext for NoUnificationContext {
         &self,
         _qid: QualifiedId<StructId>,
     ) -> (Symbol, Vec<TypeParameter>, AbilitySet) {
+        unimplemented!("NoUnificationContext does not support abilities")
+    }
+
+    /// If available, deliver the type of a type var.
+    fn var_type(&self, _vid: u32) -> Option<Type> {
+        unimplemented!("NoUnificationContext does not support abilities")
+    }
+
+    /// if available, deliver the constraints on a type var.
+    fn var_constraints(&self, _vid: u32) -> Option<&Vec<(Loc, WideningOrder, Constraint)>> {
         unimplemented!("NoUnificationContext does not support abilities")
     }
 }
@@ -2050,7 +2074,10 @@ impl Substitution {
                     Ok(())
                 }
             },
-            Fun(_, _) => check(AbilitySet::FUNCTIONS),
+            Fun(_, _, abilities) => {
+                assert!(AbilitySet::FUNCTIONS.is_subset(*abilities));
+                check(*abilities)
+            },
             Reference(_, _) => check(AbilitySet::REFERENCES),
             TypeDomain(_) | ResourceDomain(_, _, _) => check(AbilitySet::EMPTY),
             Error => Ok(()),
@@ -2312,13 +2339,15 @@ impl Substitution {
                     .map_err(TypeUnificationError::lift(order, t1, t2))?,
                 ));
             },
-            (Type::Fun(a1, r1), Type::Fun(a2, r2)) => {
+            (Type::Fun(a1, r1, abilities1), Type::Fun(a2, r2, abilities2)) => {
                 // Same as for tuples, we pass on `variance` not `sub_variance`, allowing
                 // conversion for arguments. We also have contra-variance of arguments:
                 //   |T1|R1 <= |T2|R2  <==>  T1 >= T2 && R1 <= R2
                 // Intuitively, function f1 can safely _substitute_ function f2 if any argument
                 // of type T2 can be passed as a T1 -- which is the case since T1 >= T2 (every
                 // T2 is also a T1).
+                //
+                // We test for abilities match last, to give more intuitive error messages.
                 return Ok(Type::Fun(
                     Box::new(
                         self.unify(context, variance, order.swap(), a1, a2)
@@ -2328,6 +2357,25 @@ impl Substitution {
                         self.unify(context, variance, order, r1, r2)
                             .map_err(TypeUnificationError::lift(order, t1, t2))?,
                     ),
+                    {
+                        // Widening/conversion can remove abilities, not add them.  So check that
+                        // the target has no more abilities than the source.
+                        let (missing_abilities, bad_ty) = match order {
+                            WideningOrder::LeftToRight => (abilities2.setminus(*abilities1), t1),
+                            WideningOrder::RightToLeft => (abilities1.setminus(*abilities2), t2),
+                            WideningOrder::Join => (AbilitySet::EMPTY, t1),
+                        };
+                        if missing_abilities.is_empty() {
+                            abilities1.intersect(*abilities2)
+                        } else {
+                            return Err(TypeUnificationError::MissingAbilities(
+                                Loc::default(),
+                                bad_ty.clone(),
+                                missing_abilities,
+                                None,
+                            ));
+                        }
+                    },
                 ));
             },
             (Type::Struct(m1, s1, ts1), Type::Struct(m2, s2, ts2)) => {
@@ -2980,6 +3028,7 @@ impl TypeUnificationError {
             | TypeUnificationError::MissingAbilities(loc, ..) => Some(loc.clone()),
             _ => None,
         }
+        .and_then(|loc| if loc.is_default() { None } else { Some(loc) })
     }
 
     /// Return the message for this error.
@@ -3584,12 +3633,21 @@ impl<'a> fmt::Display for TypeDisplay<'a> {
                 }
                 f.write_str(">")
             },
-            Fun(a, t) => {
+            Fun(a, t, abilities) => {
                 f.write_str("|")?;
                 write!(f, "{}", a.display(self.context))?;
                 f.write_str("|")?;
                 if !t.is_unit() {
-                    write!(f, "{}", t.display(self.context))
+                    write!(f, "{}", t.display(self.context))?;
+                }
+                if !abilities.is_subset(AbilitySet::FUNCTIONS) {
+                    // Default formatter for Abilities is not compact, manually convert here.
+                    let abilities_as_str = abilities
+                        .iter()
+                        .map(|a| a.to_string())
+                        .reduce(|l, r| format!("{}+{}", l, r))
+                        .unwrap_or_default();
+                    write!(f, ":{}", abilities_as_str)
                 } else {
                     Ok(())
                 }
@@ -3730,8 +3788,12 @@ impl fmt::Display for PrimitiveType {
 pub trait AbilityInference: AbilityContext {
     /// Infers the abilities of the type. The returned boolean indicates whether
     /// the type is a phantom type parameter,
-    fn infer_abilities(&self, ty: &Type) -> (bool, AbilitySet) {
-        match ty {
+    fn infer_abilities(
+        &self,
+        ty: &Type,
+        display_context: Option<TypeDisplayContext<'_>>,
+    ) -> (bool, AbilitySet) {
+        let res = match ty {
             Type::Primitive(p) => match p {
                 PrimitiveType::Bool
                 | PrimitiveType::U8
@@ -3743,43 +3805,101 @@ pub trait AbilityInference: AbilityContext {
                 | PrimitiveType::Num
                 | PrimitiveType::Range
                 | PrimitiveType::EventStore
-                | PrimitiveType::Address => (false, AbilitySet::PRIMITIVES),
+                | PrimitiveType::Address => {
+                    if DEBUG_TRACE {
+                        if let Some(display_context) = &display_context {
+                            debug!(
+                                "Type {} has abilities AbilitySet::PRIMITIVES",
+                                ty.display(display_context),
+                            );
+                        }
+                    };
+                    (false, AbilitySet::PRIMITIVES)
+                },
                 PrimitiveType::Signer => (false, AbilitySet::SIGNER),
             },
             Type::Vector(et) => (
                 false,
-                AbilitySet::VECTOR.intersect(self.infer_abilities(et).1),
+                AbilitySet::VECTOR.intersect(self.infer_abilities(et, display_context.clone()).1),
             ),
             Type::Struct(mid, sid, ty_args) => (
                 false,
-                self.infer_struct_abilities(mid.qualified(*sid), ty_args),
+                self.infer_struct_abilities(mid.qualified(*sid), ty_args, display_context.clone()),
             ),
             Type::TypeParameter(i) => {
                 let param = self.type_param(*i);
                 (param.1.is_phantom, param.1.abilities)
             },
-            Type::Var(_) => (false, AbilitySet::EMPTY),
+            Type::Var(id) => {
+                if let Some(ty) = self.var_type(*id) {
+                    self.infer_abilities(&ty, display_context.clone())
+                } else if let Some(constraints) = self.var_constraints(*id) {
+                    let mut ability_set = AbilitySet::EMPTY;
+                    for (_loc, _widening_order, constraint) in constraints {
+                        use Constraint::*;
+                        match constraint {
+                            SomeNumber(_) => {
+                                ability_set = ability_set.union(AbilitySet::PRIMITIVES)
+                            },
+                            SomeReference(_) => {
+                                ability_set = ability_set.union(AbilitySet::REFERENCES);
+                            },
+                            HasAbilities(cons_ability_set, _) => {
+                                ability_set = ability_set.union(*cons_ability_set);
+                            },
+                            // TODO(LAMBDA): can we do anything with these?
+                            SomeStruct(_)
+                            | SomeReceiverFunction(..)
+                            | NoReference
+                            | NoTuple
+                            | NoPhantom
+                            | WithDefault(_)
+                            | NoFunction => {},
+                        }
+                    }
+                    (false, ability_set)
+                } else {
+                    (false, AbilitySet::EMPTY)
+                }
+            },
             Type::Reference(_, _) => (false, AbilitySet::REFERENCES),
             Type::Tuple(et) => (
                 false,
                 et.iter()
-                    .map(|ty| self.infer_abilities(ty).1)
+                    .map(|ty| self.infer_abilities(ty, display_context.clone()).1)
                     .reduce(|a, b| a.intersect(b))
                     .unwrap_or(AbilitySet::PRIMITIVES),
             ),
-            Type::Fun(_, _) | Type::TypeDomain(_) | Type::ResourceDomain(_, _, _) | Type::Error => {
+            Type::Fun(_, _, abilities) => (false, *abilities),
+            Type::TypeDomain(_) | Type::ResourceDomain(_, _, _) | Type::Error => {
                 (false, AbilitySet::EMPTY)
             },
+        };
+        if DEBUG_TRACE {
+            if let Some(display_context) = &display_context {
+                debug!(
+                    "Type {}={:?} has abilities {}",
+                    ty.display(display_context),
+                    ty,
+                    res.1
+                );
+            }
         }
+        res
     }
 
-    fn infer_struct_abilities(&self, qid: QualifiedId<StructId>, ty_args: &[Type]) -> AbilitySet {
+    fn infer_struct_abilities(
+        &self,
+        qid: QualifiedId<StructId>,
+        ty_args: &[Type],
+        display_context: Option<TypeDisplayContext<'_>>,
+    ) -> AbilitySet {
         let (_, ty_params, struct_abilities) = self.struct_signature(qid);
         let ty_args_abilities_meet = ty_args
             .iter()
             .zip(ty_params)
             .map(|(ty_arg, param)| {
-                let ty_arg_abilities = self.infer_abilities(ty_arg).1;
+                let ty_arg_abilities = self.infer_abilities(ty_arg, display_context.clone()).1;
                 if param.1.is_phantom {
                     // phantom type parameters don't participate in ability derivations
                     AbilitySet::ALL
@@ -3831,6 +3951,63 @@ impl<'a> AbilityContext for AbilityInferer<'a> {
             struct_env.get_abilities(),
         )
     }
+
+    fn var_type(&self, _vid: u32) -> Option<Type> {
+        None
+    }
+
+    fn var_constraints(&self, _vid: u32) -> Option<&Vec<(Loc, WideningOrder, Constraint)>> {
+        None
+    }
 }
 
 impl<'a> AbilityInference for AbilityInferer<'a> {}
+
+/// A helper to infer abilities based on an environment, type parameters, and substitutions..
+pub struct SubsAbilityInferer<'a> {
+    env: &'a GlobalEnv,
+    type_params: &'a [TypeParameter],
+    subs: &'a Substitution,
+}
+
+impl<'a> SubsAbilityInferer<'a> {
+    pub fn new(
+        env: &'a GlobalEnv,
+        type_params: &'a [TypeParameter],
+        subs: &'a Substitution,
+    ) -> Self {
+        Self {
+            env,
+            type_params,
+            subs,
+        }
+    }
+}
+
+impl<'a> AbilityContext for SubsAbilityInferer<'a> {
+    fn type_param(&self, idx: u16) -> TypeParameter {
+        self.type_params[idx as usize].clone()
+    }
+
+    fn struct_signature(
+        &self,
+        qid: QualifiedId<StructId>,
+    ) -> (Symbol, Vec<TypeParameter>, AbilitySet) {
+        let struct_env = self.env.get_struct(qid);
+        (
+            struct_env.get_name(),
+            struct_env.get_type_parameters().to_vec(),
+            struct_env.get_abilities(),
+        )
+    }
+
+    fn var_type(&self, vid: u32) -> Option<Type> {
+        self.subs.subs.get(&vid).cloned()
+    }
+
+    fn var_constraints(&self, vid: u32) -> Option<&Vec<(Loc, WideningOrder, Constraint)>> {
+        self.subs.constraints.get(&vid)
+    }
+}
+
+impl<'a> AbilityInference for SubsAbilityInferer<'a> {}

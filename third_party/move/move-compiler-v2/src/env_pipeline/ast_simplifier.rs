@@ -359,7 +359,7 @@ fn find_possibly_modified_vars(
                     _ => {},
                 }
             },
-            Lambda(node_id, pat, _) => {
+            Lambda(node_id, pat, _, _, _) => {
                 // Define a new scope for bound vars, and turn off `modifying` within.
                 match pos {
                     VisitorPosition::Pre => {
@@ -975,10 +975,13 @@ impl<'env> ExpRewriterFunctions for SimplifierRewriter<'env> {
                 let node_id = binding.node_id();
                 let opt_type = self.env().get_node_type_opt(node_id);
                 if let Some(ty) = opt_type {
-                    let ability_set = self
-                        .env()
-                        .type_abilities(&ty, self.func_env.get_type_parameters_ref());
-                    ability_set.has_ability(Ability::Drop)
+                    let ability_set = self.env().type_abilities(
+                        &ty,
+                        self.func_env.get_type_parameters_ref(),
+                        None,
+                    );
+                    // Don't drop a function-valued expression so we don't lose errors.
+                    !ty.has_function() && ability_set.has_ability(Ability::Drop)
                 } else {
                     // We're missing type info, be conservative
                     false

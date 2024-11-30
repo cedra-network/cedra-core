@@ -4,7 +4,8 @@
 
 use crate::{
     ast::{
-        AddressSpecifier, Exp, ExpData, Operation, Pattern, ResourceSpecifier, TempIndex, Value,
+        self, AddressSpecifier, Exp, ExpData, LambdaCaptureKind, Operation, Pattern,
+        ResourceSpecifier, TempIndex, Value,
     },
     code_writer::CodeWriter,
     emit, emitln,
@@ -240,15 +241,18 @@ impl<'a> Sourcifier<'a> {
             Value::Number(int) => {
                 emit!(self.writer, "{}", int);
                 if let Some(Type::Primitive(prim)) = ty {
-                    emit!(self.writer, match prim {
-                        PrimitiveType::U8 => "u8",
-                        PrimitiveType::U16 => "u16",
-                        PrimitiveType::U32 => "u32",
-                        PrimitiveType::U64 => "",
-                        PrimitiveType::U128 => "u128",
-                        PrimitiveType::U256 => "u256",
-                        _ => "",
-                    })
+                    emit!(
+                        self.writer,
+                        match prim {
+                            PrimitiveType::U8 => "u8",
+                            PrimitiveType::U16 => "u16",
+                            PrimitiveType::U32 => "u32",
+                            PrimitiveType::U64 => "",
+                            PrimitiveType::U128 => "u128",
+                            PrimitiveType::U256 => "u256",
+                            _ => "",
+                        }
+                    )
                 }
             },
             Value::Bool(b) => emit!(self.writer, "{}", b),
@@ -283,6 +287,15 @@ impl<'a> Sourcifier<'a> {
                 self.print_list("vector[", ", ", "]", addresses.iter(), |address| {
                     emit!(self.writer, "{}", self.env().display(address))
                 })
+            },
+            Value::Function(mid, fid) => {
+                emit!(
+                    self.writer,
+                    "{}",
+                    self.env()
+                        .get_function(mid.qualified(*fid))
+                        .get_full_name_str()
+                );
             },
         }
     }
@@ -525,9 +538,25 @@ impl<'a> ExpSourcifier<'a> {
         match exp.as_ref() {
             // Following forms are all atomic and do not require parenthesis
             Invalid(_) => emit!(self.wr(), "*invalid*"),
-            Value(_, v) => {
+            Value(id, v) => {
                 let ty = self.env().get_node_type(exp.node_id());
-                self.parent.print_value(v, Some(&ty))
+                self.parent.print_value(v, Some(&ty));
+                match v {
+                    ast::Value::Function(..) => {
+                        let type_inst = self.env().get_node_instantiation(*id);
+                        if !type_inst.is_empty() {
+                            emit!(
+                                self.wr(),
+                                "<{}>",
+                                type_inst
+                                    .iter()
+                                    .map(|ty| ty.display(&self.type_display_context))
+                                    .join(", ")
+                            );
+                        }
+                    },
+                    _ => {},
+                }
             },
             LocalVar(_, name) => {
                 emit!(self.wr(), "{}", self.sym(*name))
@@ -540,12 +569,23 @@ impl<'a> ExpSourcifier<'a> {
                 }
             },
             // Following forms may require parenthesis
-            Lambda(_, pat, body) => {
+            Lambda(_, pat, body, capture_kind, abilities) => {
                 self.parenthesize(context_prio, Prio::General, || {
+                    if *capture_kind != LambdaCaptureKind::Default {
+                        emit!(self.wr(), "{} ", capture_kind);
+                    };
                     emit!(self.wr(), "|");
                     self.print_pat(pat);
                     emit!(self.wr(), "| ");
-                    self.print_exp(Prio::General, true, body)
+                    self.print_exp(Prio::General, true, body);
+                    if !abilities.is_subset(AbilitySet::FUNCTIONS) {
+                        let abilities_as_str = abilities
+                            .iter()
+                            .map(|a| a.to_string())
+                            .reduce(|l, r| format!("{}, {}", l, r))
+                            .unwrap_or_default();
+                        emit!(self.wr(), " has {}", abilities_as_str);
+                    }
                 });
             },
             Block(..) | Sequence(..) => {
@@ -793,6 +833,11 @@ impl<'a> ExpSourcifier<'a> {
                     self.print_exp_list("(", ")", args)
                 })
             },
+            Operation::Bind(mask) => self.parenthesize(context_prio, Prio::Postfix, || {
+                emit!(self.wr(), "bind({:b})", mask);
+                self.print_node_inst(id);
+                self.print_exp_list("(", ")", args)
+            }),
             Operation::Pack(mid, sid, variant) => {
                 self.parenthesize(context_prio, Prio::Postfix, || {
                     let qid = mid.qualified_inst(*sid, self.env().get_node_instantiation(id));
@@ -962,7 +1007,6 @@ impl<'a> ExpSourcifier<'a> {
             | Operation::EventStoreIncludes
             | Operation::EventStoreIncludedIn
             | Operation::SpecFunction(_, _, _)
-            | Operation::Closure(_, _)
             | Operation::UpdateField(_, _, _)
             | Operation::Result(_)
             | Operation::Index
@@ -1024,7 +1068,11 @@ impl<'a> ExpSourcifier<'a> {
         self.parenthesize(context_prio, prio, || {
             self.print_exp(prio, false, &args[0]);
             emit!(self.wr(), " {} ", repr);
-            self.print_exp(prio + 1, false, &args[1])
+            if args.len() > 1 {
+                self.print_exp(prio + 1, false, &args[1])
+            } else {
+                emit!(self.wr(), "ERROR")
+            }
         })
     }
 

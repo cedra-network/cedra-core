@@ -1,0 +1,138 @@
+
+Diagnostics:
+error: undeclared `_`
+   ┌─ tests/lambda/storable/doable_func.move:43:35
+   │
+43 │                 mod3::multiply(4, _)
+   │                                   ^
+
+error: undeclared `_`
+   ┌─ tests/lambda/storable/doable_func.move:46:33
+   │
+46 │                 alt_multiply(x, _)
+   │                                 ^
+
+error: undeclared `_`
+   ┌─ tests/lambda/storable/doable_func.move:49:32
+   │
+49 │                 mod3::multiply(_, x)
+   │                                ^
+
+error: undeclared `_`
+   ┌─ tests/lambda/storable/doable_func.move:51:27
+   │
+51 │                 multiply3(_, 3, 2)
+   │                           ^
+
+error: undeclared `_`
+   ┌─ tests/lambda/storable/doable_func.move:55:30
+   │
+55 │                 multiply3(4, _, 2)
+   │                              ^
+
+error: undeclared `_`
+   ┌─ tests/lambda/storable/doable_func.move:57:33
+   │
+57 │                 multiply3(3, 3, _)
+   │                                 ^
+
+error: undeclared `_`
+   ┌─ tests/lambda/storable/doable_func.move:67:19
+   │
+67 │                 g(_, 11)
+   │                   ^
+
+error: undeclared `_`
+   ┌─ tests/lambda/storable/doable_func.move:69:40
+   │
+69 │                 let h = mod3::multiply(_, 12);
+   │                                        ^
+
+error: expected `|_88|_87` but found a value of type `u64`
+   ┌─ tests/lambda/storable/doable_func.move:70:28
+   │
+70 │                 move |x| { h(x) } with copy + drop
+   │                            ^^^^
+
+error: undeclared `_`
+   ┌─ tests/lambda/storable/doable_func.move:72:38
+   │
+72 │                 let i = multiply3(2, _, 2);
+   │                                      ^
+
+error: expected `|_99|_98` but found a value of type `u64`
+   ┌─ tests/lambda/storable/doable_func.move:73:26
+   │
+73 │                 move |z| i(z)
+   │                          ^^^^
+
+error: undeclared `_`
+   ┌─ tests/lambda/storable/doable_func.move:76:19
+   │
+76 │                 i(_, 15)
+   │                   ^
+
+error: expected `u64` but found a value of type `|_99|_98`
+   ┌─ tests/lambda/storable/doable_func.move:71:20
+   │
+71 │               } else if (key == 14) {
+   │ ╭────────────────────^
+72 │ │                 let i = multiply3(2, _, 2);
+73 │ │                 move |z| i(z)
+74 │ │             } else {
+75 │ │                 let i = move |x, y| { let q = y - 1; 0x42::mod3::multiply(x, q + 1)  };
+76 │ │                 i(_, 15)
+77 │ │             };
+   │ ╰─────────────^
+
+error: expected `|_88|_87:copy+drop` but found a value of type `u64`
+   ┌─ tests/lambda/storable/doable_func.move:65:20
+   │
+65 │               } else if (key == 11) {
+   │ ╭────────────────────^
+66 │ │                 let g = move |x, y| mod3::multiply(x, y) with copy+drop;
+67 │ │                 g(_, 11)
+68 │ │             } else if (key == 12) {
+   · │
+76 │ │                 i(_, 15)
+77 │ │             };
+   │ ╰─────────────^
+
+error: expected `|u64|u64` but found a value of type `u64`
+   ┌─ tests/lambda/storable/doable_func.move:56:20
+   │
+56 │               } else if (key == 8) {
+   │ ╭────────────────────^
+57 │ │                 multiply3(3, 3, _)
+58 │ │             } else if (key == 9) {
+59 │ │                 let x = 2;
+   · │
+76 │ │                 i(_, 15)
+77 │ │             };
+   │ ╰─────────────^
+
+error: expected `u64` but found a value of type `|u64|u64`
+   ┌─ tests/lambda/storable/doable_func.move:52:20
+   │
+52 │               } else if (key == 6) {
+   │ ╭────────────────────^
+53 │ │                 move |x| mod3::multiply(x, 7)
+54 │ │             } else if (key == 7) {
+55 │ │                 multiply3(4, _, 2)
+   · │
+76 │ │                 i(_, 15)
+77 │ │             };
+   │ ╰─────────────^
+
+error: expected `u64` but found a value of type `|u64|u64:copy+drop`
+   ┌─ tests/lambda/storable/doable_func.move:40:20
+   │
+40 │               } else if (key == 1) {
+   │ ╭────────────────────^
+41 │ │                 mod1::triple
+42 │ │             } else if (key == 2) {
+43 │ │                 mod3::multiply(4, _)
+   · │
+76 │ │                 i(_, 15)
+77 │ │             };
+   │ ╰─────────────^

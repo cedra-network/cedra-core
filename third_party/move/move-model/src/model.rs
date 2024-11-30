@@ -44,7 +44,7 @@ use codespan_reporting::{
 };
 use itertools::Itertools;
 #[allow(unused_imports)]
-use log::{info, warn};
+use log::{debug, info, warn};
 pub use move_binary_format::file_format::{AbilitySet, Visibility};
 #[allow(deprecated)]
 use move_binary_format::normalized::Type as MType;
@@ -84,6 +84,8 @@ use std::{
     fmt::{self, Formatter, Write},
     rc::Rc,
 };
+
+static DEBUG_TRACE: bool = true;
 
 // =================================================================================================
 /// # Constants
@@ -200,13 +202,21 @@ impl Loc {
             && self.inlined_from_loc == other.inlined_from_loc
             && GlobalEnv::enclosing_span(self.span, other.span)
     }
+
+    /// Returns true if this location is the default one.
+    pub fn is_default(&self) -> bool {
+        *self == Loc::default()
+    }
 }
 
 impl Default for Loc {
     fn default() -> Self {
-        let mut files = Files::new();
-        let dummy_id = files.add(String::new(), String::new());
-        Loc::new(dummy_id, Span::default())
+        static DEFAULT: Lazy<Loc> = Lazy::new(|| {
+            let mut files = Files::new();
+            let dummy_id = files.add(String::new(), String::new());
+            Loc::new(dummy_id, Span::default())
+        });
+        DEFAULT.clone()
     }
 }
 
@@ -884,11 +894,15 @@ impl GlobalEnv {
         });
         if *DUMP_BACKTRACE {
             let bt = Backtrace::capture();
-            if BacktraceStatus::Captured == bt.status() {
+            let msg_out = if BacktraceStatus::Captured == bt.status() {
                 format!("{}\nBacktrace: {:#?}", msg, bt)
             } else {
                 msg.to_owned()
+            };
+            if DEBUG_TRACE {
+                debug!("{}", msg_out);
             }
+            msg_out
         } else {
             msg.to_owned()
         }
@@ -1503,8 +1517,15 @@ impl GlobalEnv {
     }
 
     /// Computes the abilities associated with the given type.
-    pub fn type_abilities(&self, ty: &Type, ty_params: &[TypeParameter]) -> AbilitySet {
-        AbilityInferer::new(self, ty_params).infer_abilities(ty).1
+    pub fn type_abilities(
+        &self,
+        ty: &Type,
+        ty_params: &[TypeParameter],
+        display_context: Option<TypeDisplayContext<'_>>,
+    ) -> AbilitySet {
+        AbilityInferer::new(self, ty_params)
+            .infer_abilities(ty, display_context)
+            .1
     }
 
     /// Returns associated intrinsics.
@@ -1628,11 +1649,16 @@ impl GlobalEnv {
                 FunId(self.symbol_pool.make(name_str))
             };
 
-            // While releasing any mutation, compute the called functions if needed.
+            // While releasing any mutation, compute the used/called functions if needed.
             let fun_data = &self.module_data[module_id.0 as usize]
                 .function_data
                 .get(&fun_id)
                 .unwrap();
+            let used_funs = if fun_data.used_funs.is_none() {
+                Some(self.get_used_funs_from_bytecode(&module, def_idx))
+            } else {
+                None
+            };
             let called_funs = if fun_data.called_funs.is_none() {
                 Some(self.get_called_funs_from_bytecode(&module, def_idx))
             } else {
@@ -1644,6 +1670,9 @@ impl GlobalEnv {
                 fun_data.def_idx = Some(def_idx);
                 fun_data.handle_idx = Some(handle_idx);
                 mod_data.function_idx_to_id.insert(def_idx, fun_id);
+                if let Some(used_funs) = used_funs {
+                    fun_data.used_funs = Some(used_funs);
+                }
                 if let Some(called_funs) = called_funs {
                     fun_data.called_funs = Some(called_funs);
                 }
@@ -1658,6 +1687,15 @@ impl GlobalEnv {
         mod_data.friend_modules = friend_modules;
         mod_data.compiled_module = Some(module);
         mod_data.source_map = Some(source_map);
+    }
+
+    fn get_used_funs_from_bytecode(
+        &self,
+        module: &CompiledModule,
+        def_idx: FunctionDefinitionIndex,
+    ) -> BTreeSet<QualifiedId<FunId>> {
+        // TODO(LAMBDA) -- fix when we extend bytecode with function values
+        self.get_called_funs_from_bytecode(module, def_idx)
     }
 
     fn get_called_funs_from_bytecode(
@@ -1739,13 +1777,16 @@ impl GlobalEnv {
         let field_name = self.symbol_pool.make("v");
         let mut field_data = BTreeMap::new();
         let field_id = FieldId::new(field_name);
-        field_data.insert(field_id, FieldData {
-            name: field_name,
-            loc: loc.clone(),
-            offset: 0,
-            variant: None,
-            ty,
-        });
+        field_data.insert(
+            field_id,
+            FieldData {
+                name: field_name,
+                loc: loc.clone(),
+                offset: 0,
+                variant: None,
+                ty,
+            },
+        );
         StructData {
             name: self.ghost_memory_name(var_name),
             loc,
@@ -1865,6 +1906,11 @@ impl GlobalEnv {
         self.get_module(fun.module_id).into_function(fun.id)
     }
 
+    pub fn get_function_opt(&self, fun: QualifiedId<FunId>) -> Option<FunctionEnv<'_>> {
+        self.get_module_opt(fun.module_id)
+            .map(|module| module.into_function(fun.id))
+    }
+
     /// Sets the AST based definition of the function.
     pub fn set_function_def(&mut self, fun: QualifiedId<FunId>, def: Exp) {
         let data = self
@@ -1874,6 +1920,7 @@ impl GlobalEnv {
             .function_data
             .get_mut(&fun.id)
             .unwrap();
+        data.used_funs = Some(def.used_funs());
         data.called_funs = Some(def.called_funs());
         data.def = Some(def);
     }
@@ -1891,6 +1938,7 @@ impl GlobalEnv {
         result_type: Type,
         def: Exp,
     ) {
+        let used_funs = def.used_funs();
         let called_funs = def.called_funs();
         let data = FunctionData {
             name,
@@ -1915,6 +1963,9 @@ impl GlobalEnv {
             called_funs: Some(called_funs),
             calling_funs: RefCell::new(None),
             transitive_closure_of_called_funs: RefCell::new(None),
+            used_funs: Some(used_funs),
+            using_funs: RefCell::new(None),
+            transitive_closure_of_used_funs: RefCell::new(None),
         };
         assert!(self
             .module_data
@@ -2030,6 +2081,15 @@ impl GlobalEnv {
             env: self,
             data: module_data,
         }
+    }
+
+    /// Gets a module by id.
+    pub fn get_module_opt(&self, id: ModuleId) -> Option<ModuleEnv<'_>> {
+        let module_data = self.module_data.get(id.0 as usize);
+        module_data.map(|module_data| ModuleEnv {
+            env: self,
+            data: module_data,
+        })
     }
 
     pub(crate) fn get_module_data_mut(&mut self, id: ModuleId) -> &mut ModuleData {
@@ -2354,7 +2414,7 @@ impl GlobalEnv {
 
     // Removes all functions not matching the predicate from
     //   module_data fields function_data and function_idx_to_id
-    //   remaining function_data fields called_funs and calling_funs
+    //   remaining function_data fields used_funs and using_funs
     pub fn filter_functions<F>(&mut self, mut predicate: F)
     where
         F: FnMut(&QualifiedId<FunId>) -> bool,
@@ -2368,11 +2428,11 @@ impl GlobalEnv {
                 .function_idx_to_id
                 .retain(|_, fun_id| predicate(&module_id.qualified(*fun_id)));
             module_data.function_data.values_mut().for_each(|fun_data| {
-                if let Some(called_funs) = fun_data.called_funs.as_mut() {
-                    called_funs.retain(|qfun_id| predicate(qfun_id))
+                if let Some(used_funs) = fun_data.used_funs.as_mut() {
+                    used_funs.retain(|qfun_id| predicate(qfun_id))
                 }
-                if let Some(calling_funs) = &mut *fun_data.calling_funs.borrow_mut() {
-                    calling_funs.retain(|qfun_id| predicate(qfun_id))
+                if let Some(using_funs) = &mut *fun_data.using_funs.borrow_mut() {
+                    using_funs.retain(|qfun_id| predicate(qfun_id))
                 }
             });
         }
@@ -2608,7 +2668,7 @@ impl GlobalEnv {
         if let Some(exp) = fun_def {
             emitln!(writer, " {");
             writer.indent();
-            emitln!(writer, "{}", exp.display_for_fun(fun.clone()));
+            emitln!(writer, "{}", exp.display_for_fun(fun));
             writer.unindent();
             emitln!(writer, "}");
         } else {
@@ -2811,6 +2871,11 @@ impl<'env> ModuleEnv<'env> {
         &self.data.use_decls
     }
 
+    /// Returns the friend declarations of this module.
+    pub fn get_friend_decls(&self) -> &[FriendDecl] {
+        &self.data.friend_decls
+    }
+
     /// Does this module declare `module_id` as a friend?
     pub fn has_friend(&self, module_id: &ModuleId) -> bool {
         self.data.friend_modules.contains(module_id)
@@ -2921,7 +2986,7 @@ impl<'env> ModuleEnv<'env> {
     }
 
     /// Returns the set of modules in the current package,
-    /// whose public(package) functions are called in the current module.
+    /// whose public(package) functions are called or referenced in the current module.
     /// Requires: `self` is a primary target.
     pub fn need_to_be_friended_by(&self) -> BTreeSet<ModuleId> {
         debug_assert!(self.is_primary_target());
@@ -2930,17 +2995,18 @@ impl<'env> ModuleEnv<'env> {
             return deps;
         }
         for fun_env in self.get_functions() {
-            let called_funs = fun_env.get_called_functions().expect("called functions");
-            for fun in called_funs {
-                let mod_id = fun.module_id;
-                if self.get_id() == mod_id {
+            for used_fun in fun_env.get_used_functions().expect("used functions") {
+                let used_mod_id = used_fun.module_id;
+                if self.get_id() == used_mod_id {
                     // no need to friend self
                     continue;
                 }
-                let mod_env = self.env.get_module(mod_id);
-                let fun_env = mod_env.get_function(fun.id);
-                if fun_env.has_package_visibility() && self.can_call_package_fun_in(&mod_env) {
-                    deps.insert(mod_id);
+                let used_mod_env = self.env.get_module(used_mod_id);
+                let used_fun_env = used_mod_env.get_function(used_fun.id);
+                if used_fun_env.has_package_visibility()
+                    && self.can_call_package_fun_in(&used_mod_env)
+                {
+                    deps.insert(used_mod_id);
                 }
             }
         }
@@ -3309,7 +3375,7 @@ impl<'env> ModuleEnv<'env> {
         self.data.module_spec.borrow()
     }
 
-    /// Returns whether a spec fun is ever called or not.
+    /// Returns whether a spec fun is ever called/referenced or not.
     pub fn spec_fun_is_used(&self, spec_fun_id: SpecFunId) -> bool {
         self.env
             .used_spec_funs
@@ -3331,13 +3397,16 @@ impl<'env> ModuleEnv<'env> {
     pub fn disassemble(&self) -> Option<String> {
         let view = BinaryIndexedView::Module(self.get_verified_module()?);
         let smap = self.data.source_map.as_ref().expect("source map").clone();
-        let disas = Disassembler::new(SourceMapping::new(smap, view), DisassemblerOptions {
-            only_externally_visible: false,
-            print_code: true,
-            print_basic_blocks: true,
-            print_locals: true,
-            print_bytecode_stats: false,
-        });
+        let disas = Disassembler::new(
+            SourceMapping::new(smap, view),
+            DisassemblerOptions {
+                only_externally_visible: false,
+                print_code: true,
+                print_basic_blocks: true,
+                print_locals: true,
+                print_bytecode_stats: false,
+            },
+        );
         Some(
             disas
                 .disassemble()
@@ -4056,6 +4125,20 @@ impl Default for TypeParameterKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parameter(pub Symbol, pub Type, pub Loc);
 
+impl Parameter {
+    pub fn get_name(&self) -> Symbol {
+        self.0
+    }
+
+    pub fn get_type(&self) -> Type {
+        self.1.clone()
+    }
+
+    pub fn get_loc(&self) -> Loc {
+        self.2.clone()
+    }
+}
+
 impl EqIgnoringLoc for Parameter {
     /// equal ignoring Loc
     fn eq_ignoring_loc(&self, other: &Self) -> bool {
@@ -4147,6 +4230,15 @@ pub struct FunctionData {
 
     /// A cache for the transitive closure of the called functions.
     pub(crate) transitive_closure_of_called_funs: RefCell<Option<BTreeSet<QualifiedId<FunId>>>>,
+
+    /// A cache for the used functions.
+    pub(crate) used_funs: Option<BTreeSet<QualifiedId<FunId>>>,
+
+    /// A cache for the using functions.
+    pub(crate) using_funs: RefCell<Option<BTreeSet<QualifiedId<FunId>>>>,
+
+    /// A cache for the transitive closure of the used functions.
+    pub(crate) transitive_closure_of_used_funs: RefCell<Option<BTreeSet<QualifiedId<FunId>>>>,
 }
 
 impl FunctionData {
@@ -4170,6 +4262,9 @@ impl FunctionData {
             called_funs: None,
             calling_funs: RefCell::new(None),
             transitive_closure_of_called_funs: RefCell::new(None),
+            used_funs: None,
+            using_funs: RefCell::new(None),
+            transitive_closure_of_used_funs: RefCell::new(None),
         }
     }
 }
@@ -4790,6 +4885,58 @@ impl<'env> FunctionEnv<'env> {
         !matches!(scope, VerificationScope::Only(..)) && self.is_pragma_false(VERIFY_PRAGMA)
     }
 
+    /// Get the functions that use this one, if available.
+    pub fn get_using_functions(&self) -> Option<BTreeSet<QualifiedId<FunId>>> {
+        if let Some(using) = &*self.data.using_funs.borrow() {
+            return Some(using.clone());
+        }
+        let mut set: BTreeSet<QualifiedId<FunId>> = BTreeSet::new();
+        for module_env in self.module_env.env.get_modules() {
+            for fun_env in module_env.get_functions() {
+                if fun_env
+                    .get_used_functions()?
+                    .contains(&self.get_qualified_id())
+                {
+                    set.insert(fun_env.get_qualified_id());
+                }
+            }
+        }
+        *self.data.using_funs.borrow_mut() = Some(set.clone());
+        Some(set)
+    }
+
+    /// Get the functions that this one uses, if available.
+    pub fn get_used_functions(&self) -> Option<&'_ BTreeSet<QualifiedId<FunId>>> {
+        self.data.used_funs.as_ref()
+    }
+
+    /// Get the transitive closure of the used functions. This requires that all functions
+    /// in the closure have `get_used_functions` available; if one of them not, this
+    /// function panics.
+    pub fn get_transitive_closure_of_used_functions(&self) -> BTreeSet<QualifiedId<FunId>> {
+        if let Some(trans_used) = &*self.data.transitive_closure_of_used_funs.borrow() {
+            return trans_used.clone();
+        }
+
+        let mut set = BTreeSet::new();
+        let mut reachable_funcs = VecDeque::new();
+        reachable_funcs.push_back(self.clone());
+
+        // BFS in reachable_funcs to collect all reachable functions
+        while !reachable_funcs.is_empty() {
+            let fnc = reachable_funcs.pop_front().unwrap();
+            for callee in fnc.get_used_functions().expect("call info available") {
+                let f = self.module_env.env.get_function(*callee);
+                let qualified_id = f.get_qualified_id();
+                if set.insert(qualified_id) {
+                    reachable_funcs.push_back(f.clone());
+                }
+            }
+        }
+        *self.data.transitive_closure_of_used_funs.borrow_mut() = Some(set.clone());
+        set
+    }
+
     /// Get the functions that call this one, if available.
     pub fn get_calling_functions(&self) -> Option<BTreeSet<QualifiedId<FunId>>> {
         if let Some(calling) = &*self.data.calling_funs.borrow() {
@@ -5035,6 +5182,20 @@ impl GetNameString for QualifiedId<SpecFunId> {
     }
 }
 
+impl<'a, T> fmt::Display for EnvDisplay<'a, Vec<T>>
+where
+    EnvDisplay<'a, T>: std::fmt::Display,
+{
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let xs = self
+            .val
+            .iter()
+            .map(|x| format!("{}", self.env.display(x)))
+            .collect_vec();
+        write!(f, "({})", xs.iter().join(","))
+    }
+}
+
 impl<'a, Id: Clone> fmt::Display for EnvDisplay<'a, QualifiedId<Id>>
 where
     QualifiedId<Id>: GetNameString,
@@ -5067,5 +5228,17 @@ where
 impl<'a> fmt::Display for EnvDisplay<'a, Symbol> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.val.display(self.env.symbol_pool()))
+    }
+}
+
+impl<'a> fmt::Display for EnvDisplay<'a, Parameter> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let p = self.val;
+        write!(
+            f,
+            "{}:{}",
+            p.get_name().display(self.env.symbol_pool()),
+            p.get_type().display(&self.env.get_type_display_ctx())
+        )
     }
 }

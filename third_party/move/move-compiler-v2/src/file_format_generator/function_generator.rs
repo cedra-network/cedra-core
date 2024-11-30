@@ -1200,7 +1200,7 @@ impl<'env> FunctionContext<'env> {
     pub fn is_copyable(&self, temp: TempIndex) -> bool {
         self.module
             .env
-            .type_abilities(self.temp_type(temp), &self.type_parameters)
+            .type_abilities(self.temp_type(temp), &self.type_parameters, None)
             .has_ability(FF::Ability::Copy)
     }
 
@@ -1208,7 +1208,7 @@ impl<'env> FunctionContext<'env> {
     pub fn is_droppable(&self, temp: TempIndex) -> bool {
         self.module
             .env
-            .type_abilities(self.temp_type(temp), &self.type_parameters)
+            .type_abilities(self.temp_type(temp), &self.type_parameters, None)
             .has_ability(FF::Ability::Drop)
     }
 }
