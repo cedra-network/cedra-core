@@ -15,35 +15,41 @@ pub const NUM_PEERS_PER_RETRY: usize = 3;
 pub const RETRY_INTERVAL_MSEC: u64 = 500;
 pub const RPC_TIMEOUT_MSEC: u64 = 5000;
 
+/// TODO double check backwards compatability was done correctly here and
+/// on `ConsensusMsg`
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum BlockRetrievalRequest {
+    V1(BlockRetrievalRequestV1),
+    V2(BlockRetrievalRequestV2),
+}
+
 /// RPC to get a chain of block of the given length starting from the given block id.
 /// TODO: needs to become a v2 for backwards compatibility
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct BlockRetrievalRequest {
+pub struct BlockRetrievalRequestV1 {
     block_id: HashValue,
     num_blocks: u64,
-    // TODO: remove the Option, if it's not too painful
-    target_epoch_and_round: Option<(u64, u64)>,
+    target_block_id: Option<HashValue>,
 }
 
-impl BlockRetrievalRequest {
+impl BlockRetrievalRequestV1 {
     pub fn new(block_id: HashValue, num_blocks: u64) -> Self {
-        Self {
+        BlockRetrievalRequestV1 {
             block_id,
             num_blocks,
-            target_epoch_and_round: None,
+            target_block_id: None,
         }
     }
 
-    pub fn new_with_target_round(
+    pub fn new_with_target_block_id(
         block_id: HashValue,
         num_blocks: u64,
-        target_epoch: u64,
-        target_round: u64,
+        target_block_id: HashValue,
     ) -> Self {
-        Self {
+        BlockRetrievalRequestV1 {
             block_id,
             num_blocks,
-            target_epoch_and_round: Some((target_epoch, target_round)),
+            target_block_id: Some(target_block_id),
         }
     }
 
@@ -55,23 +61,105 @@ impl BlockRetrievalRequest {
         self.num_blocks
     }
 
+    pub fn target_block_id(&self) -> Option<HashValue> {
+        self.target_block_id
+    }
+
+    pub fn match_target_id(&self, hash_value: HashValue) -> bool {
+        self.target_block_id.map_or(false, |id| id == hash_value)
+    }
+}
+
+impl fmt::Display for BlockRetrievalRequestV1 {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "[BlockRetrievalRequestV1 starting from id {} with {} blocks]",
+            self.block_id, self.num_blocks
+        )
+    }
+}
+
+/// RPC to get a chain of block of the given length starting from the given block id.
+/// TODO: needs to become a v2 for backwards compatibility
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct BlockRetrievalRequestV2 {
+    block_id: HashValue,
+    num_blocks: u64,
+    // TODO: remove the Option, if it's not too painful
+    target_epoch_and_round: Option<(u64, u64)>,
+}
+
+impl BlockRetrievalRequest {
+    pub fn new(block_id: HashValue, num_blocks: u64) -> Self {
+        Self::V2(BlockRetrievalRequestV2 {
+            block_id,
+            num_blocks,
+            target_epoch_and_round: None,
+        })
+    }
+
+    pub fn new_with_target_round(
+        block_id: HashValue,
+        num_blocks: u64,
+        target_epoch: u64,
+        target_round: u64,
+    ) -> Self {
+        Self::V2(BlockRetrievalRequestV2 {
+            block_id,
+            num_blocks,
+            target_epoch_and_round: Some((target_epoch, target_round)),
+        })
+    }
+
+    pub fn block_id(&self) -> HashValue {
+        match self {
+            BlockRetrievalRequest::V1(request) => request.block_id,
+            BlockRetrievalRequest::V2(request) => request.block_id,
+        }
+    }
+
+    pub fn num_blocks(&self) -> u64 {
+        match self {
+            BlockRetrievalRequest::V1(request) => request.num_blocks,
+            BlockRetrievalRequest::V2(request) => request.num_blocks,
+        }
+    }
+
     pub fn target_epoch_and_round(&self) -> Option<(u64, u64)> {
-        self.target_epoch_and_round
+        match self {
+            BlockRetrievalRequest::V1(_) => {
+                // TODO revisit
+                panic!("Target epoch and round are not available on BlockRetrievalRequestV1")
+            },
+            BlockRetrievalRequest::V2(v2) => v2.target_epoch_and_round,
+        }
     }
 
     pub fn match_target_round(&self, epoch: u64, round: u64) -> bool {
-        self.target_epoch_and_round
+        self.target_epoch_and_round()
             .map_or(false, |target| (epoch, round) <= target)
     }
 }
 
 impl fmt::Display for BlockRetrievalRequest {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "[BlockRetrievalRequest starting from id {} with {} blocks]",
-            self.block_id, self.num_blocks
-        )
+        match self {
+            BlockRetrievalRequest::V1(request) => {
+                write!(
+                    f,
+                    "[BlockRetrievalRequest::V1 starting from id {} with {} blocks]",
+                    request.block_id, request.num_blocks
+                )
+            },
+            BlockRetrievalRequest::V2(request) => {
+                write!(
+                    f,
+                    "[BlockRetrievalRequest::V2 starting from id {} with {} blocks]",
+                    request.block_id, request.num_blocks
+                )
+            },
+        }
     }
 }
 
