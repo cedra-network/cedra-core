@@ -146,3 +146,26 @@ pub fn profile_transaction_using_debugger(
 
     Ok((vm_status, vm_output))
 }
+
+pub fn trace_transaction_using_debugger(
+    debugger: &AptosDebugger,
+    version: u64,
+    transaction: SignedTransaction,
+    hash: HashValue,
+) -> CliTypedResult<(VMStatus, VMOutput)> {
+    let (vm_status, vm_output, mut execution_trace) = debugger
+        .execute_transaction_at_version_with_execution_tracer(version, transaction)
+        .map_err(|err| {
+            CliError::UnexpectedError(format!(
+                "failed to simulate txn with execution tracer: {}",
+                err
+            ))
+        })?;
+
+    let mut w = std::io::BufWriter::new(std::io::stdout());
+    let trace = execution_trace.dump_trace();
+    let env = &execution_trace.env;
+    trace.debug_with_loc(&mut w, env.as_ref().unwrap()).unwrap();
+
+    Ok((vm_status, vm_output))
+}

@@ -1,6 +1,8 @@
 // Copyright © Aptos Foundation
 // SPDX-License-Identifier: Apache-2.0
 
+use std::fmt::Display;
+
 use aptos_gas_algebra::{
     AbstractValueSize, Fee, FeePerGasUnit, InternalGas, NumArgs, NumBytes, NumTypeNodes,
 };
@@ -18,7 +20,7 @@ use move_core_types::{
     vm_status::StatusCode,
 };
 use move_vm_types::{
-    gas::{GasMeter as MoveGasMeter, SimpleInstruction},
+    gas::{GasMeter as MoveGasMeter, InterpreterView, SimpleInstruction},
     views::{TypeView, ValueView},
 };
 
@@ -99,13 +101,13 @@ where
     G: AptosGasMeter,
 {
     delegate_mut! {
-        fn charge_simple_instr(&mut self, instr: SimpleInstruction) -> PartialVMResult<()>;
+        fn charge_simple_instr(&mut self, instr: SimpleInstruction, interpreter: impl InterpreterView) -> PartialVMResult<()>;
 
-        fn charge_br_true(&mut self, target_offset: Option<CodeOffset>) -> PartialVMResult<()>;
+        fn charge_br_true(&mut self, target_offset: Option<CodeOffset>, interpreter: impl InterpreterView) -> PartialVMResult<()>;
 
-        fn charge_br_false(&mut self, target_offset: Option<CodeOffset>) -> PartialVMResult<()>;
+        fn charge_br_false(&mut self, target_offset: Option<CodeOffset>, interpreter: impl InterpreterView) -> PartialVMResult<()>;
 
-        fn charge_branch(&mut self, target_offset: CodeOffset) -> PartialVMResult<()>;
+        fn charge_branch(&mut self, target_offset: CodeOffset, interpreter: impl InterpreterView) -> PartialVMResult<()>;
 
         fn charge_call(
             &mut self,
@@ -113,13 +115,14 @@ where
             func_name: &str,
             args: impl ExactSizeIterator<Item = impl ValueView> + Clone,
             num_locals: NumArgs,
+            _interpreter: impl InterpreterView,
         ) -> PartialVMResult<()>;
 
-        fn charge_ld_const(&mut self, size: NumBytes) -> PartialVMResult<()>;
+        fn charge_ld_const(&mut self, size: NumBytes, interpreter: impl InterpreterView) -> PartialVMResult<()>;
 
-        fn charge_move_loc(&mut self, val: impl ValueView) -> PartialVMResult<()>;
+        fn charge_move_loc(&mut self, val: impl ValueView, interpreter: impl InterpreterView) -> PartialVMResult<()>;
 
-        fn charge_store_loc(&mut self, val: impl ValueView) -> PartialVMResult<()>;
+        fn charge_store_loc(&mut self, val: impl ValueView, interpreter_view: impl InterpreterView) -> PartialVMResult<()>;
 
         fn charge_borrow_global(
             &mut self,
@@ -127,6 +130,7 @@ where
             is_generic: bool,
             ty: impl TypeView,
             is_success: bool,
+            interpreter: impl InterpreterView,
         ) -> PartialVMResult<()>;
 
         fn charge_exists(
@@ -135,6 +139,7 @@ where
             ty: impl TypeView,
             // TODO(Gas): see if we can get rid of this param
             exists: bool,
+            interpreter: impl InterpreterView,
         ) -> PartialVMResult<()>;
 
         fn charge_move_from(
@@ -142,6 +147,7 @@ where
             is_generic: bool,
             ty: impl TypeView,
             val: Option<impl ValueView>,
+            interpreter: impl InterpreterView,
         ) -> PartialVMResult<()>;
 
         fn charge_move_to(
@@ -150,18 +156,20 @@ where
             ty: impl TypeView,
             val: impl ValueView,
             is_success: bool,
+            interpreter: impl InterpreterView,
         ) -> PartialVMResult<()>;
 
-        fn charge_vec_len(&mut self, ty: impl TypeView) -> PartialVMResult<()>;
+        fn charge_vec_len(&mut self, ty: impl TypeView, interpreter: impl InterpreterView) -> PartialVMResult<()>;
 
         fn charge_vec_borrow(
             &mut self,
             is_mut: bool,
             ty: impl TypeView,
             is_success: bool,
+            interpreter: impl InterpreterView,
         ) -> PartialVMResult<()>;
 
-        fn charge_vec_swap(&mut self, ty: impl TypeView) -> PartialVMResult<()>;
+        fn charge_vec_swap(&mut self, ty: impl TypeView, interpreter: impl InterpreterView) -> PartialVMResult<()>;
 
         fn charge_create_ty(&mut self, num_nodes: NumTypeNodes) -> PartialVMResult<()>;
 
@@ -181,6 +189,7 @@ where
         ty_args: impl ExactSizeIterator<Item = impl TypeView> + Clone,
         args: impl ExactSizeIterator<Item = impl ValueView> + Clone,
         num_locals: NumArgs,
+        interpreter: impl InterpreterView,
     ) -> PartialVMResult<()> {
         // Save the info for charge_native_function_before_execution.
         self.should_leak_memory_for_native = (*module_id.address() == CORE_CODE_ADDRESS
@@ -190,7 +199,7 @@ where
                 && module_id.name().as_str() == "event");
 
         self.base
-            .charge_call_generic(module_id, func_name, ty_args, args, num_locals)
+            .charge_call_generic(module_id, func_name, ty_args, args, num_locals, interpreter)
     }
 
     #[inline]
@@ -219,6 +228,7 @@ where
         &mut self,
         amount: InternalGas,
         ret_vals: Option<impl ExactSizeIterator<Item = impl ValueView> + Clone>,
+        interpreter: impl InterpreterView,
     ) -> PartialVMResult<()> {
         if let Some(ret_vals) = ret_vals.clone() {
             self.use_heap_memory(ret_vals.fold(AbstractValueSize::zero(), |acc, val| {
@@ -230,7 +240,7 @@ where
             }))?;
         }
 
-        self.base.charge_native_function(amount, ret_vals)
+        self.base.charge_native_function(amount, ret_vals, interpreter)
     }
 
     #[inline]
@@ -257,7 +267,7 @@ where
     }
 
     #[inline]
-    fn charge_pop(&mut self, popped_val: impl ValueView) -> PartialVMResult<()> {
+    fn charge_pop(&mut self, popped_val: impl ValueView, interpreter: impl InterpreterView) -> PartialVMResult<()> {
         self.release_heap_memory(
             self.vm_gas_params()
                 .misc
@@ -265,7 +275,7 @@ where
                 .abstract_heap_size(&popped_val, self.feature_version()),
         );
 
-        self.base.charge_pop(popped_val)
+        self.base.charge_pop(popped_val, interpreter)
     }
 
     #[inline]
@@ -284,7 +294,7 @@ where
     }
 
     #[inline]
-    fn charge_copy_loc(&mut self, val: impl ValueView) -> PartialVMResult<()> {
+    fn charge_copy_loc(&mut self, val: impl ValueView, interpreter: impl InterpreterView) -> PartialVMResult<()> {
         let heap_size = self
             .vm_gas_params()
             .misc
@@ -293,7 +303,7 @@ where
 
         self.use_heap_memory(heap_size)?;
 
-        self.base.charge_copy_loc(val)
+        self.base.charge_copy_loc(val, interpreter)
     }
 
     #[inline]
@@ -301,6 +311,7 @@ where
         &mut self,
         is_generic: bool,
         args: impl ExactSizeIterator<Item = impl ValueView> + Clone,
+        interpreter_view: impl InterpreterView,
     ) -> PartialVMResult<()> {
         self.use_heap_memory(args.clone().fold(AbstractValueSize::zero(), |acc, val| {
             acc + self
@@ -310,7 +321,7 @@ where
                 .abstract_stack_size(val, self.feature_version())
         }))?;
 
-        self.base.charge_pack(is_generic, args)
+        self.base.charge_pack(is_generic, args, interpreter_view)
     }
 
     #[inline]
@@ -318,6 +329,7 @@ where
         &mut self,
         is_generic: bool,
         args: impl ExactSizeIterator<Item = impl ValueView> + Clone,
+        interpreter: impl InterpreterView,
     ) -> PartialVMResult<()> {
         self.release_heap_memory(args.clone().fold(AbstractValueSize::zero(), |acc, val| {
             acc + self
@@ -327,11 +339,11 @@ where
                 .abstract_stack_size(val, self.feature_version())
         }));
 
-        self.base.charge_unpack(is_generic, args)
+        self.base.charge_unpack(is_generic, args, interpreter)
     }
 
     #[inline]
-    fn charge_read_ref(&mut self, val: impl ValueView) -> PartialVMResult<()> {
+    fn charge_read_ref(&mut self, val: impl ValueView, interpreter: impl InterpreterView) -> PartialVMResult<()> {
         let heap_size = self
             .vm_gas_params()
             .misc
@@ -340,7 +352,7 @@ where
 
         self.use_heap_memory(heap_size)?;
 
-        self.base.charge_read_ref(val)
+        self.base.charge_read_ref(val, interpreter)
     }
 
     #[inline]
@@ -348,6 +360,7 @@ where
         &mut self,
         new_val: impl ValueView,
         old_val: impl ValueView,
+        interpreter: impl InterpreterView,
     ) -> PartialVMResult<()> {
         self.release_heap_memory(
             self.vm_gas_params()
@@ -356,11 +369,11 @@ where
                 .abstract_heap_size(&old_val, self.feature_version()),
         );
 
-        self.base.charge_write_ref(new_val, old_val)
+        self.base.charge_write_ref(new_val, old_val, interpreter)
     }
 
     #[inline]
-    fn charge_eq(&mut self, lhs: impl ValueView, rhs: impl ValueView) -> PartialVMResult<()> {
+    fn charge_eq(&mut self, lhs: impl ValueView, rhs: impl ValueView, interpreter: impl InterpreterView) -> PartialVMResult<()> {
         self.release_heap_memory(
             self.vm_gas_params()
                 .misc
@@ -374,11 +387,11 @@ where
                 .abstract_heap_size(&rhs, self.feature_version()),
         );
 
-        self.base.charge_eq(lhs, rhs)
+        self.base.charge_eq(lhs, rhs, interpreter)
     }
 
     #[inline]
-    fn charge_neq(&mut self, lhs: impl ValueView, rhs: impl ValueView) -> PartialVMResult<()> {
+    fn charge_neq(&mut self, lhs: impl ValueView, rhs: impl ValueView, interpreter: impl InterpreterView) -> PartialVMResult<()> {
         self.release_heap_memory(
             self.vm_gas_params()
                 .misc
@@ -392,7 +405,7 @@ where
                 .abstract_heap_size(&rhs, self.feature_version()),
         );
 
-        self.base.charge_neq(lhs, rhs)
+        self.base.charge_neq(lhs, rhs, interpreter)
     }
 
     #[inline]
@@ -400,12 +413,13 @@ where
         &mut self,
         ty: impl TypeView + 'a,
         args: impl ExactSizeIterator<Item = impl ValueView> + Clone,
+        interpreter: impl InterpreterView,
     ) -> PartialVMResult<()> {
         self.use_heap_memory(args.clone().fold(AbstractValueSize::zero(), |acc, val| {
             acc + self.vm_gas_params().misc.abs_val.abstract_packed_size(val)
         }))?;
 
-        self.base.charge_vec_pack(ty, args)
+        self.base.charge_vec_pack(ty, args, interpreter)
     }
 
     #[inline]
@@ -414,12 +428,13 @@ where
         ty: impl TypeView,
         expect_num_elements: NumArgs,
         elems: impl ExactSizeIterator<Item = impl ValueView> + Clone,
+        interpreter: impl InterpreterView,
     ) -> PartialVMResult<()> {
         self.release_heap_memory(elems.clone().fold(AbstractValueSize::zero(), |acc, val| {
             acc + self.vm_gas_params().misc.abs_val.abstract_packed_size(val)
         }));
 
-        self.base.charge_vec_unpack(ty, expect_num_elements, elems)
+        self.base.charge_vec_unpack(ty, expect_num_elements, elems, interpreter)
     }
 
     #[inline]
@@ -427,10 +442,11 @@ where
         &mut self,
         ty: impl TypeView,
         val: impl ValueView,
+        interpreter: impl InterpreterView,
     ) -> PartialVMResult<()> {
         self.use_heap_memory(self.vm_gas_params().misc.abs_val.abstract_packed_size(&val))?;
 
-        self.base.charge_vec_push_back(ty, val)
+        self.base.charge_vec_push_back(ty, val, interpreter)
     }
 
     #[inline]
@@ -438,12 +454,13 @@ where
         &mut self,
         ty: impl TypeView,
         val: Option<impl ValueView>,
+        interpreter: impl InterpreterView,
     ) -> PartialVMResult<()> {
         if let Some(val) = &val {
             self.release_heap_memory(self.vm_gas_params().misc.abs_val.abstract_packed_size(val));
         }
 
-        self.base.charge_vec_pop_back(ty, val)
+        self.base.charge_vec_pop_back(ty, val, interpreter)
     }
 
     #[inline]
