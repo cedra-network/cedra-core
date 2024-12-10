@@ -23,14 +23,14 @@
     -  [Function `dispatchable_authenticate`](#@Specification_1_dispatchable_authenticate)
 
 
-<pre><code><b>use</b> <a href="create_signer.md#0x1_create_signer">0x1::create_signer</a>;
+<pre><code><b>use</b> <a href="auth_data.md#0x1_auth_data">0x1::auth_data</a>;
+<b>use</b> <a href="create_signer.md#0x1_create_signer">0x1::create_signer</a>;
 <b>use</b> <a href="../../aptos-stdlib/../move-stdlib/doc/error.md#0x1_error">0x1::error</a>;
 <b>use</b> <a href="event.md#0x1_event">0x1::event</a>;
 <b>use</b> <a href="function_info.md#0x1_function_info">0x1::function_info</a>;
 <b>use</b> <a href="object.md#0x1_object">0x1::object</a>;
 <b>use</b> <a href="../../aptos-stdlib/../move-stdlib/doc/option.md#0x1_option">0x1::option</a>;
 <b>use</b> <a href="../../aptos-stdlib/../move-stdlib/doc/signer.md#0x1_signer">0x1::signer</a>;
-<b>use</b> <a href="signing_data.md#0x1_signing_data">0x1::signing_data</a>;
 <b>use</b> <a href="../../aptos-stdlib/doc/simple_map.md#0x1_simple_map">0x1::simple_map</a>;
 <b>use</b> <a href="../../aptos-stdlib/../move-stdlib/doc/string.md#0x1_string">0x1::string</a>;
 </code></pre>
@@ -466,7 +466,7 @@ Return the current dispatchable authenticator move function info. <code>None</co
 
 
 
-<pre><code><b>fun</b> <a href="lite_account.md#0x1_lite_account_authenticate">authenticate</a>(<a href="account.md#0x1_account">account</a>: <a href="../../aptos-stdlib/../move-stdlib/doc/signer.md#0x1_signer">signer</a>, func_info: <a href="function_info.md#0x1_function_info_FunctionInfo">function_info::FunctionInfo</a>, <a href="signing_data.md#0x1_signing_data">signing_data</a>: <a href="signing_data.md#0x1_signing_data_SigningData">signing_data::SigningData</a>): <a href="../../aptos-stdlib/../move-stdlib/doc/signer.md#0x1_signer">signer</a>
+<pre><code><b>fun</b> <a href="lite_account.md#0x1_lite_account_authenticate">authenticate</a>(<a href="account.md#0x1_account">account</a>: <a href="../../aptos-stdlib/../move-stdlib/doc/signer.md#0x1_signer">signer</a>, func_info: <a href="function_info.md#0x1_function_info_FunctionInfo">function_info::FunctionInfo</a>, signing_data: <a href="auth_data.md#0x1_auth_data_AbstractionAuthData">auth_data::AbstractionAuthData</a>): <a href="../../aptos-stdlib/../move-stdlib/doc/signer.md#0x1_signer">signer</a>
 </code></pre>
 
 
@@ -478,12 +478,12 @@ Return the current dispatchable authenticator move function info. <code>None</co
 <pre><code><b>fun</b> <a href="lite_account.md#0x1_lite_account_authenticate">authenticate</a>(
     <a href="account.md#0x1_account">account</a>: <a href="../../aptos-stdlib/../move-stdlib/doc/signer.md#0x1_signer">signer</a>,
     func_info: FunctionInfo,
-    <a href="signing_data.md#0x1_signing_data">signing_data</a>: SigningData,
+    signing_data: AbstractionAuthData,
 ): <a href="../../aptos-stdlib/../move-stdlib/doc/signer.md#0x1_signer">signer</a> <b>acquires</b> <a href="lite_account.md#0x1_lite_account_DispatchableAuthenticator">DispatchableAuthenticator</a> {
     <b>let</b> func_infos = <a href="lite_account.md#0x1_lite_account_dispatchable_authenticator_internal">dispatchable_authenticator_internal</a>(<a href="../../aptos-stdlib/../move-stdlib/doc/signer.md#0x1_signer_address_of">signer::address_of</a>(&<a href="account.md#0x1_account">account</a>));
     <b>assert</b>!(<a href="../../aptos-stdlib/doc/simple_map.md#0x1_simple_map_contains_key">simple_map::contains_key</a>(func_infos, &func_info), <a href="../../aptos-stdlib/../move-stdlib/doc/error.md#0x1_error_not_found">error::not_found</a>(<a href="lite_account.md#0x1_lite_account_EFUNCTION_INFO_EXISTENCE">EFUNCTION_INFO_EXISTENCE</a>));
     <a href="function_info.md#0x1_function_info_load_module_from_function">function_info::load_module_from_function</a>(&func_info);
-    <a href="lite_account.md#0x1_lite_account_dispatchable_authenticate">dispatchable_authenticate</a>(<a href="account.md#0x1_account">account</a>, <a href="signing_data.md#0x1_signing_data">signing_data</a>, &func_info)
+    <a href="lite_account.md#0x1_lite_account_dispatchable_authenticate">dispatchable_authenticate</a>(<a href="account.md#0x1_account">account</a>, signing_data, &func_info)
 }
 </code></pre>
 
@@ -498,7 +498,7 @@ Return the current dispatchable authenticator move function info. <code>None</co
 The native function to dispatch customized move authentication function.
 
 
-<pre><code><b>fun</b> <a href="lite_account.md#0x1_lite_account_dispatchable_authenticate">dispatchable_authenticate</a>(<a href="account.md#0x1_account">account</a>: <a href="../../aptos-stdlib/../move-stdlib/doc/signer.md#0x1_signer">signer</a>, <a href="signing_data.md#0x1_signing_data">signing_data</a>: <a href="signing_data.md#0x1_signing_data_SigningData">signing_data::SigningData</a>, function: &<a href="function_info.md#0x1_function_info_FunctionInfo">function_info::FunctionInfo</a>): <a href="../../aptos-stdlib/../move-stdlib/doc/signer.md#0x1_signer">signer</a>
+<pre><code><b>fun</b> <a href="lite_account.md#0x1_lite_account_dispatchable_authenticate">dispatchable_authenticate</a>(<a href="account.md#0x1_account">account</a>: <a href="../../aptos-stdlib/../move-stdlib/doc/signer.md#0x1_signer">signer</a>, signing_data: <a href="auth_data.md#0x1_auth_data_AbstractionAuthData">auth_data::AbstractionAuthData</a>, function: &<a href="function_info.md#0x1_function_info_FunctionInfo">function_info::FunctionInfo</a>): <a href="../../aptos-stdlib/../move-stdlib/doc/signer.md#0x1_signer">signer</a>
 </code></pre>
 
 
@@ -509,7 +509,7 @@ The native function to dispatch customized move authentication function.
 
 <pre><code><b>native</b> <b>fun</b> <a href="lite_account.md#0x1_lite_account_dispatchable_authenticate">dispatchable_authenticate</a>(
     <a href="account.md#0x1_account">account</a>: <a href="../../aptos-stdlib/../move-stdlib/doc/signer.md#0x1_signer">signer</a>,
-    <a href="signing_data.md#0x1_signing_data">signing_data</a>: SigningData,
+    signing_data: AbstractionAuthData,
     function: &FunctionInfo
 ): <a href="../../aptos-stdlib/../move-stdlib/doc/signer.md#0x1_signer">signer</a>;
 </code></pre>
@@ -529,18 +529,32 @@ The native function to dispatch customized move authentication function.
 
 
 
+
+<a id="0x1_lite_account_spec_dispatchable_authenticate"></a>
+
+
+<pre><code><b>fun</b> <a href="lite_account.md#0x1_lite_account_spec_dispatchable_authenticate">spec_dispatchable_authenticate</a>(
+   <a href="account.md#0x1_account">account</a>: <a href="../../aptos-stdlib/../move-stdlib/doc/signer.md#0x1_signer">signer</a>,
+   signing_data: AbstractionAuthData,
+   function: &FunctionInfo
+): <a href="../../aptos-stdlib/../move-stdlib/doc/signer.md#0x1_signer">signer</a>;
+</code></pre>
+
+
+
 <a id="@Specification_1_dispatchable_authenticate"></a>
 
 ### Function `dispatchable_authenticate`
 
 
-<pre><code><b>fun</b> <a href="lite_account.md#0x1_lite_account_dispatchable_authenticate">dispatchable_authenticate</a>(<a href="account.md#0x1_account">account</a>: <a href="../../aptos-stdlib/../move-stdlib/doc/signer.md#0x1_signer">signer</a>, <a href="signing_data.md#0x1_signing_data">signing_data</a>: <a href="signing_data.md#0x1_signing_data_SigningData">signing_data::SigningData</a>, function: &<a href="function_info.md#0x1_function_info_FunctionInfo">function_info::FunctionInfo</a>): <a href="../../aptos-stdlib/../move-stdlib/doc/signer.md#0x1_signer">signer</a>
+<pre><code><b>fun</b> <a href="lite_account.md#0x1_lite_account_dispatchable_authenticate">dispatchable_authenticate</a>(<a href="account.md#0x1_account">account</a>: <a href="../../aptos-stdlib/../move-stdlib/doc/signer.md#0x1_signer">signer</a>, signing_data: <a href="auth_data.md#0x1_auth_data_AbstractionAuthData">auth_data::AbstractionAuthData</a>, function: &<a href="function_info.md#0x1_function_info_FunctionInfo">function_info::FunctionInfo</a>): <a href="../../aptos-stdlib/../move-stdlib/doc/signer.md#0x1_signer">signer</a>
 </code></pre>
 
 
 
 
 <pre><code><b>pragma</b> opaque;
+<b>ensures</b> [abstract] result == <a href="lite_account.md#0x1_lite_account_spec_dispatchable_authenticate">spec_dispatchable_authenticate</a>(<a href="account.md#0x1_account">account</a>, signing_data, function);
 </code></pre>
 
 

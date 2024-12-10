@@ -10,7 +10,7 @@ module aptos_framework::lite_account {
     use aptos_framework::event;
     use aptos_framework::function_info::{Self, FunctionInfo};
     use aptos_framework::object;
-    use aptos_framework::signing_data::SigningData;
+    use aptos_framework::auth_data::AbstractionAuthData;
     #[test_only]
     use aptos_framework::account::create_account_for_test;
 
@@ -162,7 +162,7 @@ module aptos_framework::lite_account {
     fun authenticate(
         account: signer,
         func_info: FunctionInfo,
-        signing_data: SigningData,
+        signing_data: AbstractionAuthData,
     ): signer acquires DispatchableAuthenticator {
         let func_infos = dispatchable_authenticator_internal(signer::address_of(&account));
         assert!(simple_map::contains_key(func_infos, &func_info), error::not_found(EFUNCTION_INFO_EXISTENCE));
@@ -173,7 +173,7 @@ module aptos_framework::lite_account {
     /// The native function to dispatch customized move authentication function.
     native fun dispatchable_authenticate(
         account: signer,
-        signing_data: SigningData,
+        signing_data: AbstractionAuthData,
         function: &FunctionInfo
     ): signer;
 
