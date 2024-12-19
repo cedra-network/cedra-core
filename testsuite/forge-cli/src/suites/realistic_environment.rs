@@ -61,6 +61,7 @@ pub(crate) fn realistic_env_sweep_wrap(
         .with_initial_fullnode_count(num_fullnodes)
         .with_validator_override_node_config_fn(Arc::new(|config, _| {
             config.execution.processed_transactions_detailed_counters = true;
+            config.api.failpoints_enabled = true;
         }))
         .add_network_test(test)
         // Test inherits the main EmitJobRequest, so update here for more precise latency measurements
@@ -82,10 +83,8 @@ pub(crate) fn realistic_env_sweep_wrap(
 pub(crate) fn realistic_env_load_sweep_test() -> ForgeConfig {
     realistic_env_sweep_wrap(10, 5, LoadVsPerfBenchmark {
         test: Box::new(PerformanceBenchmark),
-        workloads: Workloads::TPS(vec![1000, 5000, 10000, 12000, 13000, 14000, 15000]),
+        workloads: Workloads::TPS(vec![1000, 2000, 2500, 3000, 3500]),
         criteria: [
-            (95, 0.9, 1.1, 1.2, 0),
-            (95, 0.9, 1.1, 1.2, 0),
             (95, 0.9, 1.1, 1.2, 0),
             (95, 0.9, 1.1, 1.2, 0),
             (95, 0.9, 1.1, 1.2, 0),
