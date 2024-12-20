@@ -11,7 +11,7 @@
 
 * [Cedra Network](https://cedra.network/)
 * Follow us on [Twitter](https://twitter.com/cedranetwork).
-* Join us on the [Aptos Discord](https://discord.gg/Gqwk6SkgWc).
+* Join us on the [Cedra Network Discord](https://discord.gg/Gqwk6SkgWc).
 
 
 Cedra Core is licensed under [Apache 2.0](https://github.com/cerda-network/cedra-core/blob/main/LICENSE).
